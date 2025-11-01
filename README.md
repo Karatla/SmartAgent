@@ -2,3 +2,4 @@
 uvicorn backend.main:app --reload
 # Terminal 2
 cd frontend && npm run dev
+sudo systemctl status ollama
