@@ -1,0 +1,11 @@
+{
+  "products": [
+    { "id": 1, "name": "Lunar Lamp", "price": 49 },
+    { "id": 2, "name": "Solar Speaker", "price": 89 }
+  ],
+  "sales": [
+    { "date": "2025-10-01", "total": 500 },
+    { "date": "2025-10-02", "total": 720 },
+    { "date": "2025-10-03", "total": 610 }
+  ]
+}
