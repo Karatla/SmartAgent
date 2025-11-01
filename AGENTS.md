@@ -1,3 +1,112 @@
+
+---
+
+# 🧠 AI Runtime Web Agent
+
+### Overview
+
+This agent powers a **natural-language controlled web interface**, where users can talk or type to change what they see on a website — instantly, without editing code.
+
+Instead of traditional hard-coded pages, the website’s frontend acts as a **runtime renderer** that displays layouts described in **AI-generated JSON**.
+The backend AI agent interprets user intent, queries data, and returns a layout that the frontend immediately renders.
+
+This makes the web experience **intent-driven**, not code-driven.
+
+---
+
+## 🎯 Core Idea
+
+> “AI dynamically generates the website’s UI and data views at runtime.”
+
+* The **frontend** is static and knows how to render generic layouts (`Table`, `Chart`, `Text`, etc.).
+* The **AI backend** creates a layout JSON describing what to show.
+* The **database** remains the source of truth for data.
+* The **user** interacts via natural language or voice.
+* The **UI changes in real-time** without rebuilding or deploying new code.
+
+---
+
+## 🏗️ System Architecture
+
+```
+User → (Chat or Voice)
+      ↓
+[AI Runtime Server]
+ ├── Intent Parser (LLM)
+ ├── Action Planner
+ ├── Database Access Layer
+ └── UI Generator → JSON Layout
+      ↓
+[Frontend React Runtime]
+ ├── Renders JSON instantly
+ ├── Components: Table, Chart, etc.
+ └── Updates on new layout
+      ↓
+[Database]
+ └── Real product, sales, user data
+```
+
+---
+
+## 🧩 Example Flow
+
+**User:**
+
+> “Show me product list.”
+
+**AI Runtime Server:**
+
+* Parses intent → “Display products.”
+* Fetches data from DB.
+* Returns layout JSON:
+
+  ```json
+  {
+    "type": "Page",
+    "title": "Product List",
+    "children": [{ "type": "Table", "source": "products" }]
+  }
+  ```
+
+**Frontend:**
+
+* Receives JSON.
+* Renders the `Table` component with real data.
+
+---
+
+## ⚙️ Prototype Components
+
+| Component                      | Description                                                     |
+| ------------------------------ | --------------------------------------------------------------- |
+| `backend/main.py`              | FastAPI server that simulates AI responses (or integrates GPT). |
+| `backend/db.json`              | Mock data for products and sales.                               |
+| `frontend/App.jsx`             | Main UI where user types requests.                              |
+| `frontend/DynamicRenderer.jsx` | Renders UI from layout JSON.                                    |
+| `frontend/components/*`        | Table and Chart React components.                               |
+
+---
+
+## 🚀 Future Vision
+
+Eventually, this will evolve into a **self-adapting AI runtime framework** that:
+
+* Connects to any database automatically.
+* Understands user intent from natural conversation.
+* Generates and updates the web UI on demand.
+* Supports real-time voice, multi-modal input, and auto-context memory.
+
+
+## 🧭 Notes
+
+* The **frontend stays constant** — it never changes code dynamically.
+  The **AI backend changes the JSON layout**, and the frontend re-renders.
+* JSON acts as a **universal bridge** between AI and UI.
+* This structure allows future **live code generation** if desired (Codex SDK supports that).
+
+---
+
+
 # Repository Guidelines
 
 ## Project Structure & Module Organization
