@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
@@ -14,6 +16,3 @@ body {
   min-height: 100vh;
   background-color: #f3f4f6;
 }
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
