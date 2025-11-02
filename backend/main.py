@@ -1,11 +1,12 @@
-import json
-from pathlib import Path
-
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from ollama import chat
+import json
 
 app = FastAPI()
 
+# Allow frontend calls
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,40 +15,95 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# fake database
-db_path = Path(__file__).resolve().parent / "db.json"
-with db_path.open("r") as f:
+# Mock database
+with open("backend/db.json") as f:
     db = json.load(f)
 
-@app.get("/ai_layout")
-def ai_layout(query: str = Query(...)):
-    """
-    Simulates an AI agent that generates UI JSON
-    based on user intent.
-    """
-    q = query.lower()
-    if "product" in q:
-        layout = {
-            "type": "Page",
-            "title": "Product List",
-            "children": [{"type": "Table", "source": "products"}],
-        }
-        data = db["products"]
+### -------- Tool Functions -------- ###
 
-    elif "sale" in q or "chart" in q:
-        layout = {
-            "type": "Page",
-            "title": "Sales Chart",
-            "children": [{
+def get_product_table() -> dict:
+    """Return a JSON layout for the product table."""
+    return {
+        "type": "Page",
+        "title": "Product List",
+        "children": [
+            {"type": "Table", "source": "products"}
+        ]
+    }
+
+def get_sales_chart(period: str = "month") -> dict:
+    """Return a sales chart layout for a specific period.
+
+    Args:
+        period: one of "today", "week", or "month"
+    """
+    return {
+        "type": "Page",
+        "title": f"Sales Chart ({period})",
+        "children": [
+            {
                 "type": "Chart",
                 "chartType": "bar",
                 "source": "sales"
-            }],
+            }
+        ]
+    }
+
+tools = [get_product_table, get_sales_chart]
+
+### -------- Request Model -------- ###
+
+class AIQuery(BaseModel):
+    message: str
+
+### -------- AI Layout Endpoint -------- ###
+
+@app.post("/ai_layout")
+async def ai_layout(query: AIQuery):
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a UI agent. Your job is to call tools to return layout JSON.\n"
+                "DO NOT explain anything. Do NOT return markdown or freeform text.\n"
+                "Only call tools or return layout as tool results."
+            ),
+        },
+        {"role": "user", "content": query.message},
+    ]
+
+    # 1. Ask Qwen for what to do
+    response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
+
+    messages.append(response.message)
+
+    if response.message.tool_calls:
+        call = response.message.tool_calls[0]
+        tool_name = call.function.name
+        args = call.function.arguments
+
+        # 2. Execute the tool function
+        layout_result = globals()[tool_name](**args)
+
+        # 3. Send result back to Qwen to complete the flow (optional)
+        messages.append({
+            "role": "tool",
+            "tool_name": tool_name,
+            "content": json.dumps(layout_result)
+        })
+
+        final_response = chat(model="qwen3:8b", messages=messages, tools=tools, think=True)
+
+        print(final_response)
+
+        return {
+            "layout": layout_result,
+            "data": db.get(layout_result["children"][0]["source"], [])
         }
-        data = db["sales"]
 
     else:
-        layout = {"type": "Text", "content": "I didn’t understand that."}
-        data = {}
-
-    return {"layout": layout, "data": data}
+        # fallback if model replies with raw layout (no tool call)
+        return {
+            "layout": json.loads(response.message.content),
+            "data": []
+        }

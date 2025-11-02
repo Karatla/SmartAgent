@@ -5,12 +5,27 @@ function App() {
   const [layout, setLayout] = useState(null);
   const [data, setData] = useState(null);
   const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
 
   const handleSend = async () => {
-    const res = await fetch(`http://localhost:8000/ai_layout?query=${input}`);
-    const json = await res.json();
-    setLayout(json.layout);
-    setData(json.data);
+    if (!input.trim()) return;
+    setLoading(true);
+    try {
+      const res = await fetch("http://localhost:8000/ai_layout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ message: input }),
+      });
+      const json = await res.json();
+      setLayout(json.layout);
+      setData(json.data);
+    } catch (err) {
+      console.error("Error fetching layout:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -30,6 +45,8 @@ function App() {
           Send
         </button>
       </div>
+
+      {loading && <p>Loading layout...</p>}
 
       {layout && <DynamicRenderer layout={layout} data={data} />}
     </div>
