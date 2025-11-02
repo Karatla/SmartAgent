@@ -77,6 +77,8 @@ async def ai_layout(query: AIQuery):
 
     messages.append(response.message)
 
+    print(response)
+
     if response.message.tool_calls:
         call = response.message.tool_calls[0]
         tool_name = call.function.name
@@ -92,7 +94,7 @@ async def ai_layout(query: AIQuery):
             "content": json.dumps(layout_result)
         })
 
-        final_response = chat(model="qwen3:8b", messages=messages, tools=tools, think=True)
+        final_response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
 
         print(final_response)
 
