@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 import DynamicRenderer from "./DynamicRenderer";
 
 function App() {
@@ -6,13 +6,12 @@ function App() {
   const [data, setData] = useState(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [messages, setMessages] = useState([]);
-  const messagesEndRef = useRef(null);
+  const [error, setError] = useState("");
 
   const handleSend = async () => {
-    if (!input.trim()) return;
-    const userMessage = { role: "user", content: input };
-    setMessages((prev) => [...prev, userMessage]);
+    const message = input.trim();
+    if (!message) return;
+    setError("");
     setLoading(true);
     setInput("");
 
@@ -22,59 +21,59 @@ function App() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message: userMessage.content }),
+        body: JSON.stringify({ message }),
       });
       const json = await res.json();
       setLayout(json.layout);
       setData(json.data);
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "Layout generated." },
-      ]);
     } catch (err) {
       console.error("Error fetching layout:", err);
+      setError("I ran into an issue generating the layout. Please try again.");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
   return (
-    <div className="h-screen bg-gray-100 flex flex-col">
-      <div className="flex-grow flex items-center justify-center px-4">
-        {layout ? (
-          <div className="bg-white rounded-xl shadow-md p-6 max-w-3xl w-full">
-            <DynamicRenderer layout={layout} data={data} />
-          </div>
-        ) : (
-          <p className="text-center text-gray-500">
-            Ask something to generate a layout.
-          </p>
-        )}
-      </div>
-
-      <div className="w-full flex justify-center pb-6 px-4">
-        <div className="flex w-full max-w-2xl gap-2">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your request..."
-            className="flex-1 px-4 py-2 rounded-lg border border-gray-300 shadow-sm focus:outline-none focus:ring focus:ring-blue-200"
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
-          />
-          <button
-            onClick={handleSend}
-            disabled={loading}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition disabled:opacity-50"
-          >
-            {loading ? "..." : "Send"}
-          </button>
+    <div className="flex min-h-screen flex-col bg-slate-100">
+      <main className="flex flex-1 items-center justify-center px-4">
+        <div className="w-full max-w-3xl text-center">
+          {layout ? (
+            <div className="rounded-2xl border border-slate-200 bg-white px-6 py-8 shadow-md">
+              <DynamicRenderer layout={layout} data={data} />
+            </div>
+          ) : (
+            <p className="text-base font-medium text-slate-500">
+              Ask something to generate a layout.
+            </p>
+          )}
         </div>
-      </div>
+      </main>
+
+      <footer className="px-4 pb-8">
+        <div className="mx-auto w-full max-w-3xl space-y-2">
+          {error && (
+            <p className="text-sm font-medium text-rose-500">{error}</p>
+          )}
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Type your request..."
+              className="flex-1 px-4 py-3 rounded-lg border border-gray-300 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onKeyDown={(e) => e.key === "Enter" && handleSend()}
+            />
+            <button
+              onClick={handleSend}
+              disabled={loading}
+              className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white px-6 py-3 rounded-lg transition font-medium"
+            >
+              {loading ? "Sending…" : "Send"}
+            </button>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
