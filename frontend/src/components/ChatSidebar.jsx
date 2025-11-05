@@ -33,16 +33,35 @@ export default function ChatSidebar({ messages = [], loading = false }) {
                 {m.role === "user" ? "You" : "Assistant"}
               </div>
               <div className="whitespace-pre-wrap break-words">{m.content}</div>
-              {Array.isArray(m.thinking) && m.thinking.length > 0 && (
+              {(Array.isArray(m.logs) && m.logs.length > 0) ||
+              (Array.isArray(m.thinking) && m.thinking.length > 0) ? (
                 <div className="mt-2 text-[11px] text-slate-700">
                   <div className="font-semibold mb-1">Process</div>
-                  <ul className="list-disc pl-4 space-y-1">
-                    {m.thinking.map((t, j) => (
-                      <li key={j} className="break-words">{t}</li>
-                    ))}
+                  <ul className="space-y-1">
+                    {(Array.isArray(m.logs) && m.logs.length > 0
+                      ? m.logs
+                      : (m.thinking || []).map((t) => ({ type: "thinking", text: t }))
+                    ).map((entry, j) => {
+                      const label =
+                        entry.type === "tool"
+                          ? "Tools"
+                          : entry.type === "tool_result"
+                          ? "Tool Result"
+                          : entry.type === "model"
+                          ? "Model"
+                          : entry.type === "data"
+                          ? "Data"
+                          : "Thinking";
+                      return (
+                        <li key={j} className="break-words">
+                          <span className="font-semibold mr-1">{label}:</span>
+                          <span>{entry.text}</span>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </div>
-              )}
+              ) : null}
             </div>
           ))}
           {loading && (

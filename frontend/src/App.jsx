@@ -3,6 +3,18 @@ import DynamicRenderer from "./DynamicRenderer";
 import ChatSidebar from "./components/ChatSidebar";
 import "./App.css";
 
+const coerceData = (value) => {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+  if (typeof value === "object") {
+    const values = Object.values(value);
+    const list = values.find((v) => Array.isArray(v));
+    if (list) return list;
+    return values;
+  }
+  return [];
+};
+
 function App() {
   const [layout, setLayout] = useState(null);
   const [data, setData] = useState(null);
@@ -37,6 +49,8 @@ function App() {
                 role: m.role,
                 content: m.content,
                 thinking: Array.isArray(m.thinking) ? m.thinking : [],
+                logs:
+                  m.meta && Array.isArray(m.meta.logs) ? m.meta.logs : [],
               }))
           : [];
         setMessages(msgs);
@@ -51,7 +65,7 @@ function App() {
       .then((json) => {
         if (json?.layout) {
           setLayout(json.layout);
-          setData(json.data || []);
+          setData(coerceData(json.data));
         }
       })
       .catch(() => {});
@@ -65,12 +79,15 @@ function App() {
     setInput("");
 
     // Append user message to chat
-    setMessages((prev) => [...prev, { role: "user", content: message }]);
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: message, thinking: [], logs: [] },
+    ]);
 
     // Insert assistant skeleton to stream thinking lines
     setMessages((prev) => [
       ...prev,
-      { role: "assistant", content: "Working…", thinking: [] },
+      { role: "assistant", content: "Working…", thinking: [], logs: [] },
     ]);
 
     const updateLastAssistant = (updater) => {
@@ -88,7 +105,7 @@ function App() {
 
     const finalize = (layout, data) => {
       setLayout(layout);
-      setData(data);
+      setData(coerceData(data));
       const title = layout?.title || layout?.type || "Updated the view.";
       updateLastAssistant(() => ({ content: `Showing: ${title}` }));
       setLoading(false);
@@ -103,23 +120,35 @@ function App() {
         });
         const json = await res.json();
         finalize(json.layout, json.data);
-        // add any trace we got
-        if (Array.isArray(json?.trace)) {
-          json.trace.forEach((line) => {
-            updateLastAssistant((curr) => ({
-              thinking: [...(curr.thinking || []), line],
-            }));
-          });
-        }
+        // add any logs/trace we got
+        const entries = Array.isArray(json?.logs)
+          ? json.logs
+          : Array.isArray(json?.trace)
+          ? json.trace.map((t) => ({ type: "thinking", text: t }))
+          : [];
+        entries.forEach((entry) => {
+          updateLastAssistant((curr) => ({
+            thinking:
+              entry.type === "thinking"
+                ? [...(curr.thinking || []), entry.text]
+                : curr.thinking || [],
+            logs: [...(curr.logs || []), entry],
+          }));
+        });
       } catch (err) {
         console.error("Fallback fetch error:", err);
         setError("Streaming failed and fallback also failed. Please retry.");
-        updateLastAssistant(() => ({
+        const errorSteps = [
+          "Attempted streaming via /ai_layout_stream",
+          "Falling back to /ai_layout",
+          "Fallback failed",
+        ];
+        updateLastAssistant((curr) => ({
           content: "Sorry, streaming failed.",
-          thinking: [
-            "Attempted streaming via /ai_layout_stream",
-            "Falling back to /ai_layout",
-            "Fallback failed",
+          thinking: [...(curr.thinking || []), ...errorSteps],
+          logs: [
+            ...(curr.logs || []),
+            ...errorSteps.map((text) => ({ type: "thinking", text })),
           ],
         }));
         setLoading(false);
@@ -144,10 +173,51 @@ function App() {
           if (!line) return;
           updateLastAssistant((curr) => ({
             thinking: [...(curr.thinking || []), line],
+            logs: [...(curr.logs || []), { type: "thinking", text: line }],
           }));
         } catch (_) {
           // ignore bad lines
         }
+      });
+      es.addEventListener("tool", (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          const line = payload?.text || "";
+          if (!line) return;
+          updateLastAssistant((curr) => ({
+            logs: [...(curr.logs || []), { type: "tool", text: line }],
+          }));
+        } catch (_) {}
+      });
+      es.addEventListener("tool_result", (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          const line = payload?.text || "";
+          if (!line) return;
+          updateLastAssistant((curr) => ({
+            logs: [...(curr.logs || []), { type: "tool_result", text: line }],
+          }));
+        } catch (_) {}
+      });
+      es.addEventListener("model", (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          const line = payload?.text || "";
+          if (!line) return;
+          updateLastAssistant((curr) => ({
+            logs: [...(curr.logs || []), { type: "model", text: line }],
+          }));
+        } catch (_) {}
+      });
+      es.addEventListener("data", (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          const line = payload?.text || "";
+          if (!line) return;
+          updateLastAssistant((curr) => ({
+            logs: [...(curr.logs || []), { type: "data", text: line }],
+          }));
+        } catch (_) {}
       });
 
       es.addEventListener("final", (ev) => {
