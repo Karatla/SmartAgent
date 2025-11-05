@@ -1,12 +1,61 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import DynamicRenderer from "./DynamicRenderer";
+import ChatSidebar from "./components/ChatSidebar";
+import "./App.css";
 
 function App() {
   const [layout, setLayout] = useState(null);
   const [data, setData] = useState(null);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const esRef = useRef(null);
+  const [sessionId, setSessionId] = useState(null);
+
+  // Initialize session and load chat history on first render
+  useEffect(() => {
+    let sid = localStorage.getItem("session_id");
+    if (!sid) {
+      try {
+        sid = crypto?.randomUUID?.() || `s-${Math.random().toString(36).slice(2, 10)}`;
+      } catch {
+        sid = `s-${Math.random().toString(36).slice(2, 10)}`;
+      }
+      localStorage.setItem("session_id", sid);
+    }
+    setSessionId(sid);
+
+    // Load history from backend
+    fetch(`http://localhost:8000/chat_history?session_id=${encodeURIComponent(sid)}`)
+      .then((r) => r.json())
+      .then((json) => {
+        const msgs = Array.isArray(json?.messages)
+          ? json.messages
+              .filter((m) => m.role === "user" || m.role === "assistant")
+              .map((m) => ({
+                role: m.role,
+                content: m.content,
+                thinking: Array.isArray(m.thinking) ? m.thinking : [],
+              }))
+          : [];
+        setMessages(msgs);
+      })
+      .catch(() => {
+        // ignore history load errors in UI
+      });
+
+    // Restore last view (layout + data)
+    fetch(`http://localhost:8000/last_view?session_id=${encodeURIComponent(sid)}`)
+      .then((r) => r.json())
+      .then((json) => {
+        if (json?.layout) {
+          setLayout(json.layout);
+          setData(json.data || []);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleSend = async () => {
     const message = input.trim();
@@ -15,43 +64,136 @@ function App() {
     setLoading(true);
     setInput("");
 
-    try {
-      const res = await fetch("http://localhost:8000/ai_layout", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ message }),
+    // Append user message to chat
+    setMessages((prev) => [...prev, { role: "user", content: message }]);
+
+    // Insert assistant skeleton to stream thinking lines
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", content: "Working…", thinking: [] },
+    ]);
+
+    const updateLastAssistant = (updater) => {
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === "assistant") {
+            next[i] = { ...next[i], ...updater(next[i]) };
+            break;
+          }
+        }
+        return next;
       });
-      const json = await res.json();
-      setLayout(json.layout);
-      setData(json.data);
-    } catch (err) {
-      console.error("Error fetching layout:", err);
-      setError("I ran into an issue generating the layout. Please try again.");
-    } finally {
+    };
+
+    const finalize = (layout, data) => {
+      setLayout(layout);
+      setData(data);
+      const title = layout?.title || layout?.type || "Updated the view.";
+      updateLastAssistant(() => ({ content: `Showing: ${title}` }));
       setLoading(false);
+    };
+
+    const fallbackFetch = async () => {
+      try {
+        const res = await fetch("http://localhost:8000/ai_layout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, session_id: sessionId || "default" }),
+        });
+        const json = await res.json();
+        finalize(json.layout, json.data);
+        // add any trace we got
+        if (Array.isArray(json?.trace)) {
+          json.trace.forEach((line) => {
+            updateLastAssistant((curr) => ({
+              thinking: [...(curr.thinking || []), line],
+            }));
+          });
+        }
+      } catch (err) {
+        console.error("Fallback fetch error:", err);
+        setError("Streaming failed and fallback also failed. Please retry.");
+        updateLastAssistant(() => ({
+          content: "Sorry, streaming failed.",
+          thinking: [
+            "Attempted streaming via /ai_layout_stream",
+            "Falling back to /ai_layout",
+            "Fallback failed",
+          ],
+        }));
+        setLoading(false);
+      }
+    };
+
+    try {
+      // Close any previous stream
+      if (esRef.current) {
+        esRef.current.close();
+        esRef.current = null;
+      }
+
+      const url = `http://localhost:8000/ai_layout_stream?message=${encodeURIComponent(message)}&session_id=${encodeURIComponent(sessionId || "default")}`;
+      const es = new EventSource(url);
+      esRef.current = es;
+
+      es.addEventListener("thinking", (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          const line = typeof payload === "string" ? payload : payload.text || "";
+          if (!line) return;
+          updateLastAssistant((curr) => ({
+            thinking: [...(curr.thinking || []), line],
+          }));
+        } catch (_) {
+          // ignore bad lines
+        }
+      });
+
+      es.addEventListener("final", (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          finalize(payload.layout, payload.data);
+        } finally {
+          es.close();
+          esRef.current = null;
+        }
+      });
+
+      es.onerror = () => {
+        console.warn("EventSource error; closing and falling back.");
+        try { es.close(); } catch {}
+        esRef.current = null;
+        // Fallback to regular fetch
+        fallbackFetch();
+      };
+    } catch (err) {
+      console.error("Stream init error:", err);
+      // Fallback to regular fetch
+      fallbackFetch();
     }
   };
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-100">
-      <main className="flex flex-1 items-center justify-center px-4">
-        <div className="w-full max-w-3xl text-center">
-          {layout ? (
-            <div className="rounded-2xl border border-slate-200 bg-white px-6 py-8 shadow-md">
-              <DynamicRenderer layout={layout} data={data} />
-            </div>
-          ) : (
-            <p className="text-base font-medium text-slate-500">
-              Ask something to generate a layout.
-            </p>
-          )}
+      <main className="flex flex-1 justify-center px-4 py-6 lg:pr-[440px]">
+        <div className="w-full max-w-6xl flex items-start">
+          <div className="flex-1">
+            {layout ? (
+              <div className="rounded-2xl border border-slate-200 bg-white px-6 py-8 shadow-md">
+                <DynamicRenderer layout={layout} data={data} />
+              </div>
+            ) : (
+              <p className="text-base font-medium text-slate-500 text-center">
+                Ask something to generate a layout.
+              </p>
+            )}
+          </div>
         </div>
       </main>
 
-      <footer className="px-4 pb-8">
-        <div className="mx-auto w-full max-w-3xl space-y-2">
+      <footer className="px-4 pb-8 lg:pr-[440px]">
+        <div className="mx-auto w-full max-w-6xl space-y-2">
           {error && (
             <p className="text-sm font-medium text-rose-500">{error}</p>
           )}
@@ -74,6 +216,11 @@ function App() {
           </div>
         </div>
       </footer>
+
+      {/* Fixed right sidebar */}
+      <div className="hidden lg:block fixed right-0 top-0 bottom-0 w-[400px] p-4">
+        <ChatSidebar messages={messages} loading={loading} />
+      </div>
     </div>
   );
 }
