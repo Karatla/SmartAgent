@@ -16,6 +16,7 @@ SYSTEM_PROMPT = (
 )
 
 MAX_TURNS = 20  # limit messages from history
+MAX_TOOL_STEPS = 8  # prevent infinite tool loops
 
 
 def build_llm_messages(session_id: str):
@@ -104,95 +105,86 @@ async def ai_layout(query: AIQuery):
     # Build LLM messages from prior history (including just-saved user)
     messages = build_llm_messages(sid)
 
-    # 1. Ask Qwen for what to do
-    trace.append("Calling model: qwen3:8b with tool specs")
-    response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
+    # Tool-calling loop: support multiple tools/turns
+    last_layout = None
+    for step in range(1, MAX_TOOL_STEPS + 1):
+        trace.append(f"Calling model: qwen3:8b with tool specs (step {step})")
+        response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
+        messages.append(response.message)
 
-    messages.append(response.message)
+        if response.message.tool_calls:
+            for call in response.message.tool_calls:
+                tool_name = call.function.name
+                args = call.function.arguments or {}
+                try:
+                    args_preview = json.dumps(args)
+                except Exception:
+                    args_preview = str(args)
+                trace.append(f"Model requested tool: {tool_name} with args: {args_preview}")
 
-    print(response)
+                try:
+                    tool_result = globals()[tool_name](**args)
+                except Exception as e:
+                    tool_result = {"type": "Text", "content": f"Tool {tool_name} error: {e}"}
 
-    if response.message.tool_calls:
-        call = response.message.tool_calls[0]
-        tool_name = call.function.name
-        args = call.function.arguments
-        try:
-            args_preview = json.dumps(args)
-        except Exception:
-            args_preview = str(args)
-        trace.append(f"Model requested tool: {tool_name} with args: {args_preview}")
+                if isinstance(tool_result, dict):
+                    last_layout = tool_result
+                    title = tool_result.get("title") or tool_result.get("type")
+                    if title:
+                        trace.append(f"Executed tool → layout: {title}")
 
-        # 2. Execute the tool function
-        layout_result = globals()[tool_name](**(args or {}))
-        title = layout_result.get("title") or layout_result.get("type")
-        trace.append(f"Executed tool → layout: {title}")
-
-        # 3. Send result back to Qwen to complete the flow (optional)
-        messages.append({
-            "role": "tool",
-            "tool_name": tool_name,
-            "content": json.dumps(layout_result)
-        })
-
-        final_response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
-
-        print(final_response)
-
-        # Collect main data source if present (first child)
-        try:
-            source_key = layout_result["children"][0].get("source")
-        except Exception:
-            source_key = None
-
-        data_rows = db.get(source_key, []) if source_key else []
-        if source_key:
-            trace.append(f"Prepared dataset for source '{source_key}' ({len(data_rows)} rows)")
+                messages.append({
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "content": json.dumps(tool_result),
+                })
+            continue
         else:
-            trace.append("No data source detected in layout; returning empty dataset")
-
-        result = {
-            "layout": layout_result,
-            "data": data_rows,
-            "trace": trace,
-        }
-
-        # Persist assistant summary (+ thinking trace)
-        try:
-            summary = f"Showing: {title}" if title else "Updated the view."
-            history.append(sid, "assistant", summary, thinking=trace)
-            # Persist view snapshot (layout)
-            history.append(sid, "view", "layout", meta={"layout": layout_result})
-        except Exception:
-            pass
-
-        return result
-
+            content = getattr(response.message, "content", None)
+            if content:
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict):
+                        last_layout = parsed
+                        title = parsed.get("title") or parsed.get("type")
+                        if title:
+                            trace.append(f"Parsed final layout: {title}")
+                except Exception:
+                    trace.append("Model returned non-JSON content; retaining last tool layout")
+            break
     else:
-        # fallback if model replies with raw layout (no tool call)
-        trace.append("Model returned raw layout without tool call")
-        try:
-            layout = json.loads(response.message.content)
-            title = layout.get("title") or layout.get("type")
-            trace.append(f"Parsed raw layout: {title}")
-        except Exception:
-            layout = {"type": "Text", "content": "Unable to parse layout"}
-            trace.append("Failed to parse raw layout; using Text fallback")
+        trace.append("Reached tool step limit; using last known layout")
 
-        result = {
-            "layout": layout,
-            "data": [],
-            "trace": trace,
-        }
+    layout_result = last_layout or {"type": "Text", "content": "No layout generated"}
 
-        try:
-            title = layout.get("title") or layout.get("type")
-            summary = f"Showing: {title}" if title else "Updated the view."
-            history.append(sid, "assistant", summary, thinking=trace)
-            history.append(sid, "view", "layout", meta={"layout": layout})
-        except Exception:
-            pass
+    # Collect main data source if present (first child)
+    try:
+        source_key = layout_result["children"][0].get("source")
+    except Exception:
+        source_key = None
 
-        return result
+    data_rows = db.get(source_key, []) if source_key else []
+    if source_key:
+        trace.append(f"Prepared dataset for source '{source_key}' ({len(data_rows)} rows)")
+    else:
+        trace.append("No data source detected in layout; returning empty dataset")
+
+    result = {
+        "layout": layout_result,
+        "data": data_rows,
+        "trace": trace,
+    }
+
+    # Persist assistant summary (+ thinking trace) and view snapshot
+    try:
+        title = layout_result.get("title") or layout_result.get("type")
+        summary = f"Showing: {title}" if title else "Updated the view."
+        history.append(sid, "assistant", summary, thinking=trace)
+        history.append(sid, "view", "layout", meta={"layout": layout_result})
+    except Exception:
+        pass
+
+    return result
 
 
 def _sse(event: str, data) -> str:
@@ -212,9 +204,6 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
         # Initial status
         yield _sse("thinking", {"text": f"Received query: {message}"})
         trace_local.append(f"Received query: {message}")
-        yield _sse("thinking", {"text": "Calling model: qwen3:8b with tool specs"})
-        trace_local.append("Calling model: qwen3:8b with tool specs")
-
         # Persist user message for this session
         try:
             history.append(sid, "user", message)
@@ -224,90 +213,94 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
         # Prepare LLM messages including history and the just-saved user
         messages = build_llm_messages(sid)
 
-        # Ask model for tool selection / raw layout
-        response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
-        messages.append(response.message)
+        last_layout = None
+        for step_idx in range(1, MAX_TOOL_STEPS + 1):
+            step_text = f"Calling model: qwen3:8b with tool specs (step {step_idx})"
+            yield _sse("thinking", {"text": step_text})
+            trace_local.append(step_text)
 
-        if response.message.tool_calls:
-            call = response.message.tool_calls[0]
-            tool_name = call.function.name
-            args = call.function.arguments
-            try:
-                args_preview = json.dumps(args)
-            except Exception:
-                args_preview = str(args)
-            step = f"Model requested tool: {tool_name} with args: {args_preview}"
-            yield _sse("thinking", {"text": step})
-            trace_local.append(step)
+            response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
+            messages.append(response.message)
 
-            # Execute tool
-            layout_result = globals()[tool_name](**(args or {}))
-            title = layout_result.get("title") or layout_result.get("type")
-            step = f"Executed tool → layout: {title}"
-            yield _sse("thinking", {"text": step})
-            trace_local.append(step)
+            if response.message.tool_calls:
+                # Handle possibly multiple tool calls
+                for call in response.message.tool_calls:
+                    tool_name = call.function.name
+                    args = call.function.arguments or {}
+                    try:
+                        args_preview = json.dumps(args)
+                    except Exception:
+                        args_preview = str(args)
+                    step = f"Model requested tool: {tool_name} with args: {args_preview}"
+                    yield _sse("thinking", {"text": step})
+                    trace_local.append(step)
 
-            # Optionally validate with model
-            messages.append({
-                "role": "tool",
-                "tool_name": tool_name,
-                "content": json.dumps(layout_result),
-            })
+                    try:
+                        tool_result = globals()[tool_name](**args)
+                    except Exception as e:
+                        tool_result = {"type": "Text", "content": f"Tool {tool_name} error: {e}"}
 
-            chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
-            yield _sse("thinking", {"text": "Validated layout with model"})
-            trace_local.append("Validated layout with model")
+                    if isinstance(tool_result, dict):
+                        last_layout = tool_result
+                        title = tool_result.get("title") or tool_result.get("type")
+                        step = f"Executed tool → layout: {title}"
+                        yield _sse("thinking", {"text": step})
+                        trace_local.append(step)
 
-            # Prepare data
-            try:
-                source_key = layout_result["children"][0].get("source")
-            except Exception:
-                source_key = None
+                    messages.append({
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "content": json.dumps(tool_result),
+                    })
 
-            data_rows = db.get(source_key, []) if source_key else []
-            if source_key:
-                step = f"Prepared dataset for source '{source_key}' ({len(data_rows)} rows)"
-                yield _sse("thinking", {"text": step})
-                trace_local.append(step)
+                continue
             else:
-                step = "No data source detected in layout; returning empty dataset"
-                yield _sse("thinking", {"text": step})
-                trace_local.append(step)
-
-            # Persist assistant message with collected trace
-            try:
-                summary = f"Showing: {title}" if title else "Updated the view."
-                history.append(sid, "assistant", summary, thinking=trace_local)
-                history.append(sid, "view", "layout", meta={"layout": layout_result})
-            except Exception:
-                pass
-
-            yield _sse("final", {"layout": layout_result, "data": data_rows})
+                # Try final layout parse
+                content = getattr(response.message, "content", None)
+                if content:
+                    try:
+                        parsed = json.loads(content)
+                        if isinstance(parsed, dict):
+                            last_layout = parsed
+                            title = parsed.get("title") or parsed.get("type")
+                            step = f"Parsed final layout: {title}"
+                            yield _sse("thinking", {"text": step})
+                            trace_local.append(step)
+                    except Exception:
+                        step = "Model returned non-JSON content; retaining last tool layout"
+                        yield _sse("thinking", {"text": step})
+                        trace_local.append(step)
+                break
         else:
-            # Raw layout path
-            step = "Model returned raw layout without tool call"
+            step = "Reached tool step limit; using last known layout"
             yield _sse("thinking", {"text": step})
             trace_local.append(step)
-            try:
-                layout = json.loads(response.message.content)
-                title = layout.get("title") or layout.get("type")
-                step = f"Parsed raw layout: {title}"
-                yield _sse("thinking", {"text": step})
-                trace_local.append(step)
-            except Exception:
-                layout = {"type": "Text", "content": "Unable to parse layout"}
-                step = "Failed to parse raw layout; using Text fallback"
-                yield _sse("thinking", {"text": step})
-                trace_local.append(step)
 
-            try:
-                summary = f"Showing: {title}" if isinstance(layout, dict) and (title := (layout.get("title") or layout.get("type"))) else "Updated the view."
-                history.append(sid, "assistant", summary, thinking=trace_local)
-                history.append(sid, "view", "layout", meta={"layout": layout})
-            except Exception:
-                pass
+        layout_final = last_layout or {"type": "Text", "content": "No layout generated"}
+        try:
+            source_key = layout_final["children"][0].get("source")
+        except Exception:
+            source_key = None
+        data_rows = db.get(source_key, []) if source_key else []
+        if source_key:
+            step = f"Prepared dataset for source '{source_key}' ({len(data_rows)} rows)"
+            yield _sse("thinking", {"text": step})
+            trace_local.append(step)
+        else:
+            step = "No data source detected in layout; returning empty dataset"
+            yield _sse("thinking", {"text": step})
+            trace_local.append(step)
 
-            yield _sse("final", {"layout": layout, "data": []})
+        # Persist assistant message with collected trace and view snapshot
+        try:
+            title = layout_final.get("title") or layout_final.get("type")
+            summary = f"Showing: {title}" if title else "Updated the view."
+            history.append(sid, "assistant", summary, thinking=trace_local)
+            history.append(sid, "view", "layout", meta={"layout": layout_final})
+        except Exception:
+            pass
+
+        yield _sse("final", {"layout": layout_final, "data": data_rows})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
