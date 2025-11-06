@@ -173,3 +173,29 @@ def test_mutation_flow_insert_update_delete(client):
     assert delete_result["meta"]["action"] == "delete"
     product_skus = [row["sku"] for row in delete_result["datasets"]["products"]]
     assert "NEW-200" not in product_skus
+
+
+def test_fetch_dataset_query_path(client):
+    """Allow LLMs to run arbitrary SELECT statements with aliases."""
+
+    result = backend_main.fetch_dataset(
+        query="SELECT sku, name, status FROM products WHERE status = :status",
+        params={"status": "active"},
+        alias="active_products",
+    )
+
+    assert "datasets" in result
+    rows = result["datasets"]["active_products"]
+    assert rows
+    assert all(row["status"] == "active" for row in rows)
+    meta = result["meta"]
+    assert meta["query"].startswith("SELECT")
+    assert meta["columns"] == ["sku", "name", "status"]
+
+
+def test_fetch_dataset_query_validation(client):
+    """Non-SELECT statements should be rejected."""
+
+    result = backend_main.fetch_dataset(query="DELETE FROM products")
+    assert result["type"] == "Text"
+    assert "Only SELECT statements" in result["content"]

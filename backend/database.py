@@ -608,6 +608,35 @@ class RuntimeDatabase:
 
     # ----- Mutation helpers -----
 
+    def run_select(self, query: str, params: Iterable[Any] | Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if not isinstance(query, str):
+            return {"ok": False, "message": "Query must be a string."}
+
+        cleaned = query.strip()
+        if not cleaned.lower().startswith("select"):
+            return {
+                "ok": False,
+                "message": "Only SELECT statements are allowed via this tool.",
+            }
+
+        if ";" in cleaned[:-1]:
+            return {
+                "ok": False,
+                "message": "Multiple SQL statements are not permitted.",
+            }
+
+        bound_params = params or ()
+
+        with self._connect() as conn:
+            try:
+                cursor = conn.execute(cleaned, bound_params)
+            except Exception as exc:
+                return {"ok": False, "message": f"Query failed: {exc}"}
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+        return {"ok": True, "rows": rows, "columns": columns}
+
     def _get_meta(self, source: str) -> Dict[str, Any]:
         return TABLE_META.get(source)
 

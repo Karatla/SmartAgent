@@ -159,8 +159,53 @@ history = HistoryStore("backend/chat_history.jsonl")
 
 ### -------- Tool Functions -------- ###
 
-def fetch_dataset(source: str, days: int | None = None) -> dict:
-    """Return dataset rows for a given source with optional day slicing."""
+def fetch_dataset(
+    source: str | None = None,
+    days: int | None = None,
+    query: str | None = None,
+    params: dict | list | tuple | None = None,
+    alias: str | None = None,
+) -> dict:
+    """
+    Retrieve rows for the planner with either convenience lookups or direct SQL queries.
+
+    Tips for the model:
+    - Prefer the `source` + optional `days` arguments when you just need one of the known datasets
+      (`products`, `sales`, `customers`, `orders`, `order_items`). The response automatically returns
+      the named dataset with all columns.
+    - When you need filtered/aggregated data, submit a single SELECT statement via `query`.
+      You may bind parameters safely using `params` (dict or list/tuple). Only SELECT queries are allowed.
+    - Use `alias` to choose the dataset key that downstream layout tools should reference. Otherwise the
+      tool will fall back to the provided `source` or `query_results`.
+    """
+
+    if query:
+        result = database.run_select(query, params)
+        if not result.get("ok"):
+            message = result.get("message") or "Query failed."
+            return {"type": "Text", "content": message}
+
+        dataset_name = alias or source or "query_results"
+        rows = result.get("rows", [])
+        meta = {
+            "source": dataset_name,
+            "query": query,
+            "params": params,
+            "rows": len(rows),
+            "columns": result.get("columns", []),
+        }
+        if alias and source and alias != source:
+            meta["requested_source"] = source
+        return {
+            "datasets": {dataset_name: rows},
+            "meta": meta,
+        }
+
+    if not source:
+        return {
+            "type": "Text",
+            "content": "fetch_dataset requires either a source or a SELECT query.",
+        }
 
     rows = database.get_rows(source, days=days)
 
@@ -175,7 +220,14 @@ def fetch_dataset(source: str, days: int | None = None) -> dict:
 
 
 def build_table_layout(source: str, title: str | None = None) -> dict:
-    """Create a table layout referencing a data source."""
+    """
+    Produce a simple page layout that renders a table for the given dataset.
+
+    Tips for the model:
+    - Ensure `source` matches a dataset key you already loaded (for example via `fetch_dataset`).
+    - Provide an optional `title` to control the page heading; otherwise a friendly default is used.
+    - The frontend expects the dataset to be available under the same name you reference here.
+    """
 
     title = title or f"{source.title()} Table"
     return {
@@ -198,7 +250,15 @@ def build_chart_layout(
     metric: str = "total",
     title: str | None = None,
 ) -> dict:
-    """Create a single-chart page for a dataset."""
+    """
+    Generate a page layout containing a single chart for a dataset.
+
+    Tips for the model:
+    - `source` should reference a dataset already prepared in the response payload.
+    - `chart_type` can be `bar`, `line`, etc., mapped to known frontend chart primitives.
+    - `metric` controls the numeric field plotted on the Y axis; default is `total`.
+    - Use `title` to customize the page heading; otherwise the tool derives one automatically.
+    """
 
     title = title or f"{source.title()} {chart_type.title()}"
     return {
@@ -218,7 +278,14 @@ def build_chart_layout(
 
 
 def describe_sources() -> dict:
-    """Return available data sources and fields."""
+    """
+    Inspect available datasets and schema information.
+
+    Tips for the model:
+    - Call this when you need to understand field names, row counts, or to decide which tables to query.
+    - The response places schema details inside `meta["sources"]`; datasets stay empty by design.
+    - Pair this with subsequent `fetch_dataset` calls to retrieve actual rows.
+    """
 
     summary = database.describe_sources()
     return {"datasets": {}, "meta": {"sources": summary}}
@@ -250,21 +317,42 @@ def _mutation_response(action: str, source: str, result: dict) -> dict:
 
 
 def add_record(source: str, values: dict) -> dict:
-    """Insert a new record into the runtime database."""
+    """
+    Insert a new record into the runtime database.
+
+    Tips for the model:
+    - Provide all required fields for the chosen `source`; missing attributes are echoed back for correction.
+    - The tool returns the refreshed dataset under the same source name along with a `row` echo for the insert.
+    - Use this sparingly and only when the user explicitly requests data creation.
+    """
 
     result = database.insert_row(source, values or {})
     return _mutation_response("insert", source, result)
 
 
 def update_record(source: str, values: dict) -> dict:
-    """Update an existing record driven by primary key fields."""
+    """
+    Update an existing record using its primary key.
+
+    Tips for the model:
+    - Include the full primary key for the table (e.g., `sku` for products, `id` for customers).
+    - Supply only the fields you intend to modify alongside the key(s); the tool keeps other columns intact.
+    - Useful for status changes, corrections, or inventory adjustments requested by the user.
+    """
 
     result = database.update_row(source, values or {})
     return _mutation_response("update", source, result)
 
 
 def remove_record(source: str, keys: dict) -> dict:
-    """Delete an existing record by primary key."""
+    """
+    Delete a record identified by its primary key.
+
+    Tips for the model:
+    - Provide the primary key fields for the target table; missing keys are reported back.
+    - The tool returns the updated dataset for confirmation.
+    - Use only when the user explicitly asks to remove data.
+    """
 
     result = database.delete_row(source, keys or {})
     return _mutation_response("delete", source, result)
