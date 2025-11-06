@@ -58,23 +58,78 @@ def _coerce_dataset(data):
 
 def _extract_layout_payload(payload):
     layout = None
-    data = None
+    datasets: dict[str, list] = {}
     if isinstance(payload, dict):
         if "layout" in payload:
             layout = payload.get("layout")
+            raw_datasets = payload.get("datasets")
+            if isinstance(raw_datasets, dict):
+                for key, value in raw_datasets.items():
+                    datasets[key] = _coerce_dataset(value)
+            elif raw_datasets is not None:
+                datasets["data"] = _coerce_dataset(raw_datasets)
             if "data" in payload:
-                data = payload.get("data")
-            elif "datasets" in payload:
-                datasets = payload.get("datasets")
-                if isinstance(datasets, dict):
-                    for value in datasets.values():
-                        data = value
-                        break
-                elif isinstance(datasets, list) and datasets:
-                    data = datasets[0]
+                datasets.setdefault("data", _coerce_dataset(payload.get("data")))
         else:
             layout = payload
-    return layout, _coerce_dataset(data)
+    return layout, datasets
+
+
+def _collect_sources(node):
+    sources = set()
+    if isinstance(node, dict):
+        source = node.get("source")
+        if source:
+            sources.add(source)
+        children = node.get("children")
+        if isinstance(children, list):
+            for child in children:
+                sources |= _collect_sources(child)
+    elif isinstance(node, list):
+        for item in node:
+            sources |= _collect_sources(item)
+    return sources
+
+
+def _resolve_datasets(layout, candidate_datasets, logs, trace=None):
+    normalized: dict[str, list] = {}
+    if isinstance(candidate_datasets, dict):
+        for key, value in candidate_datasets.items():
+            normalized[key] = _coerce_dataset(value)
+
+    sources = _collect_sources(layout)
+
+    if "data" in normalized and len(sources) == 1:
+        src = next(iter(sources))
+        if src not in normalized:
+            normalized[src] = normalized.pop("data")
+            msg = f"Mapped generic 'data' dataset to source '{src}'"
+            logs.append({"type": "data", "text": msg})
+            if trace is not None:
+                trace.append(msg)
+
+    if not normalized and not sources:
+        normalized["data"] = []
+
+    for src in sources:
+        if src not in normalized:
+            rows = db.get(src, [])
+            normalized[src] = rows
+            msg = f"Loaded dataset for '{src}' from DB ({len(rows)} rows)"
+            logs.append({"type": "data", "text": msg})
+            if trace is not None:
+                trace.append(msg)
+
+    if not normalized:
+        normalized["data"] = []
+
+    for key, rows in normalized.items():
+        msg = f"Dataset '{key}' ready with {len(rows) if isinstance(rows, list) else '?'} rows"
+        logs.append({"type": "data", "text": msg})
+        if trace is not None:
+            trace.append(msg)
+
+    return normalized
 
 app = FastAPI()
 
@@ -107,7 +162,9 @@ def get_product_table() -> dict:
     }
     return {
         "layout": layout,
-        "data": db.get("products", []),
+        "datasets": {
+            "products": db.get("products", []),
+        },
     }
 
 def get_sales_chart(period: str = "month") -> dict:
@@ -130,7 +187,9 @@ def get_sales_chart(period: str = "month") -> dict:
     data = db.get("sales", [])
     return {
         "layout": layout,
-        "data": data,
+        "datasets": {
+            "sales": data,
+        },
     }
 
 tools = [get_product_table, get_sales_chart]
@@ -160,7 +219,7 @@ async def ai_layout(query: AIQuery):
 
     # Tool-calling loop: support multiple tools/turns
     last_layout = None
-    last_data = None
+    candidate_datasets: dict[str, list] = {}
     for step in range(1, MAX_TOOL_STEPS + 1):
         step_txt = f"Calling model: qwen3:8b with tool specs (step {step})"
         trace.append(step_txt)
@@ -185,7 +244,7 @@ async def ai_layout(query: AIQuery):
                 except Exception as e:
                     tool_result = {"type": "Text", "content": f"Tool {tool_name} error: {e}"}
 
-                layout_candidate, data_candidate = _extract_layout_payload(tool_result)
+                layout_candidate, datasets_candidate = _extract_layout_payload(tool_result)
                 if layout_candidate:
                     last_layout = layout_candidate
                     title = layout_candidate.get("title") or layout_candidate.get("type")
@@ -193,12 +252,10 @@ async def ai_layout(query: AIQuery):
                         step_log = f"Executed tool → layout: {title}"
                         trace.append(step_log)
                         logs.append({"type": "tool_result", "text": step_log})
-                if data_candidate is not None:
-                    last_data = data_candidate
-                    if isinstance(last_data, list):
-                        logs.append({"type": "data", "text": f"Tool provided dataset with {len(last_data)} rows"})
-                    else:
-                        logs.append({"type": "data", "text": "Tool provided dataset"})
+                if datasets_candidate:
+                    candidate_datasets.update(datasets_candidate)
+                    keys = ", ".join(sorted(datasets_candidate.keys())) or "data"
+                    logs.append({"type": "data", "text": f"Tool provided datasets: {keys}"})
 
                 messages.append({
                     "role": "tool",
@@ -211,7 +268,7 @@ async def ai_layout(query: AIQuery):
             if content:
                 try:
                     parsed = json.loads(content)
-                    layout_candidate, data_candidate = _extract_layout_payload(parsed)
+                    layout_candidate, datasets_candidate = _extract_layout_payload(parsed)
                     if layout_candidate:
                         last_layout = layout_candidate
                         title = layout_candidate.get("title") or layout_candidate.get("type")
@@ -219,12 +276,10 @@ async def ai_layout(query: AIQuery):
                             fin = f"Parsed final layout: {title}"
                             trace.append(fin)
                             logs.append({"type": "thinking", "text": fin})
-                    if data_candidate is not None:
-                        last_data = data_candidate
-                        if isinstance(last_data, list):
-                            logs.append({"type": "data", "text": f"Model response included dataset with {len(last_data)} rows"})
-                        else:
-                            logs.append({"type": "data", "text": "Model response included dataset"})
+                    if datasets_candidate:
+                        candidate_datasets.update(datasets_candidate)
+                        keys = ", ".join(sorted(datasets_candidate.keys())) or "data"
+                        logs.append({"type": "data", "text": f"Model response included datasets: {keys}"})
                     logs.append({"type": "model", "text": _preview(content)})
                 except Exception:
                     warn = "Model returned non-JSON content; retaining last tool layout"
@@ -238,34 +293,13 @@ async def ai_layout(query: AIQuery):
         logs.append({"type": "thinking", "text": txt})
 
     layout_result = last_layout or {"type": "Text", "content": "No layout generated"}
-
-    if last_data is None:
-        try:
-            source_key = layout_result["children"][0].get("source")
-        except Exception:
-            source_key = None
-
-        if source_key:
-            last_data = db.get(source_key, [])
-            info = f"Prepared dataset for source '{source_key}' ({len(last_data)} rows)"
-            trace.append(info)
-            logs.append({"type": "data", "text": info})
-        else:
-            last_data = []
-            info = "No data source detected in layout; returning empty dataset"
-            trace.append(info)
-            logs.append({"type": "thinking", "text": info})
-    else:
-        if isinstance(last_data, list):
-            info = f"Using dataset with {len(last_data)} rows from tool chain"
-        else:
-            info = "Using dataset returned by tool chain"
-        trace.append(info)
-        logs.append({"type": "data", "text": info})
+    datasets_final = _resolve_datasets(layout_result, candidate_datasets, logs, trace)
+    primary_data = next(iter(datasets_final.values()), [])
 
     result = {
         "layout": layout_result,
-        "data": last_data,
+        "datasets": datasets_final,
+        "data": primary_data,
         "trace": trace,
         "logs": logs,
     }
@@ -274,8 +308,19 @@ async def ai_layout(query: AIQuery):
     try:
         title = layout_result.get("title") or layout_result.get("type")
         summary = f"Showing: {title}" if title else "Updated the view."
-        history.append(sid, "assistant", summary, thinking=trace, meta={"logs": logs, "data": last_data})
-        history.append(sid, "view", "layout", meta={"layout": layout_result, "data": last_data})
+        history.append(
+            sid,
+            "assistant",
+            summary,
+            thinking=trace,
+            meta={"logs": logs, "datasets": datasets_final},
+        )
+        history.append(
+            sid,
+            "view",
+            "layout",
+            meta={"layout": layout_result, "datasets": datasets_final},
+        )
     except Exception:
         pass
 
@@ -311,7 +356,7 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
         messages = build_llm_messages(sid)
 
         last_layout = None
-        last_data = None
+        candidate_datasets: dict[str, list] = {}
         for step_idx in range(1, MAX_TOOL_STEPS + 1):
             step_text = f"Calling model: qwen3:8b with tool specs (step {step_idx})"
             yield _sse("thinking", {"text": step_text})
@@ -340,7 +385,7 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
                     except Exception as e:
                         tool_result = {"type": "Text", "content": f"Tool {tool_name} error: {e}"}
 
-                    layout_candidate, data_candidate = _extract_layout_payload(tool_result)
+                    layout_candidate, datasets_candidate = _extract_layout_payload(tool_result)
                     if layout_candidate:
                         last_layout = layout_candidate
                         title = layout_candidate.get("title") or layout_candidate.get("type")
@@ -348,15 +393,11 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
                         yield _sse("tool_result", {"text": step, "title": title})
                         trace_local.append(step)
                         logs_local.append({"type": "tool_result", "text": step})
-                    if data_candidate is not None:
-                        last_data = data_candidate
-                        if isinstance(last_data, list):
-                            data_msg = f"Tool provided dataset with {len(last_data)} rows"
-                            rows = len(last_data)
-                        else:
-                            data_msg = "Tool provided dataset"
-                            rows = None
-                        yield _sse("data", {"text": data_msg, "rows": rows})
+                    if datasets_candidate:
+                        candidate_datasets.update(datasets_candidate)
+                        keys = ", ".join(sorted(datasets_candidate.keys())) or "data"
+                        data_msg = f"Tool provided datasets: {keys}"
+                        yield _sse("data", {"text": data_msg})
                         trace_local.append(data_msg)
                         logs_local.append({"type": "data", "text": data_msg})
 
@@ -373,7 +414,7 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
                 if content:
                     try:
                         parsed = json.loads(content)
-                        layout_candidate, data_candidate = _extract_layout_payload(parsed)
+                        layout_candidate, datasets_candidate = _extract_layout_payload(parsed)
                         if layout_candidate:
                             last_layout = layout_candidate
                             title = layout_candidate.get("title") or layout_candidate.get("type")
@@ -383,15 +424,11 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
                             trace_local.append(step)
                             logs_local.append({"type": "model", "text": _preview(content)})
                             logs_local.append({"type": "thinking", "text": step})
-                        if data_candidate is not None:
-                            last_data = data_candidate
-                            if isinstance(last_data, list):
-                                data_msg = f"Model response included dataset with {len(last_data)} rows"
-                                rows = len(last_data)
-                            else:
-                                data_msg = "Model response included dataset"
-                                rows = None
-                            yield _sse("data", {"text": data_msg, "rows": rows})
+                        if datasets_candidate:
+                            candidate_datasets.update(datasets_candidate)
+                            keys = ", ".join(sorted(datasets_candidate.keys())) or "data"
+                            data_msg = f"Model response included datasets: {keys}"
+                            yield _sse("data", {"text": data_msg})
                             trace_local.append(data_msg)
                             logs_local.append({"type": "data", "text": data_msg})
                     except Exception:
@@ -409,44 +446,30 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
             logs_local.append({"type": "thinking", "text": step})
 
         layout_final = last_layout or {"type": "Text", "content": "No layout generated"}
-        if last_data is None:
-            try:
-                source_key = layout_final["children"][0].get("source")
-            except Exception:
-                source_key = None
-            if source_key:
-                last_data = db.get(source_key, [])
-                step = f"Prepared dataset for source '{source_key}' ({len(last_data)} rows)"
-                yield _sse("data", {"text": step, "rows": len(last_data)})
-                trace_local.append(step)
-                logs_local.append({"type": "data", "text": step})
-            else:
-                last_data = []
-                step = "No data source detected in layout; returning empty dataset"
-                yield _sse("thinking", {"text": step})
-                trace_local.append(step)
-                logs_local.append({"type": "thinking", "text": step})
-        else:
-            if isinstance(last_data, list):
-                step = f"Using dataset with {len(last_data)} rows from tool chain"
-                rows = len(last_data)
-            else:
-                step = "Using dataset returned by tool chain"
-                rows = None
-            yield _sse("data", {"text": step, "rows": rows})
-            trace_local.append(step)
-            logs_local.append({"type": "data", "text": step})
+        datasets_final = _resolve_datasets(layout_final, candidate_datasets, logs_local, trace_local)
 
         # Persist assistant message with collected trace and view snapshot
         try:
             title = layout_final.get("title") or layout_final.get("type")
             summary = f"Showing: {title}" if title else "Updated the view."
-            history.append(sid, "assistant", summary, thinking=trace_local, meta={"logs": logs_local, "data": last_data})
-            history.append(sid, "view", "layout", meta={"layout": layout_final, "data": last_data})
+            history.append(
+                sid,
+                "assistant",
+                summary,
+                thinking=trace_local,
+                meta={"logs": logs_local, "datasets": datasets_final},
+            )
+            history.append(
+                sid,
+                "view",
+                "layout",
+                meta={"layout": layout_final, "datasets": datasets_final},
+            )
         except Exception:
             pass
 
-        yield _sse("final", {"layout": layout_final, "data": last_data})
+        primary_data = next(iter(datasets_final.values()), [])
+        yield _sse("final", {"layout": layout_final, "datasets": datasets_final, "data": primary_data})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -468,24 +491,24 @@ async def last_view(session_id: Optional[str] = Query(None)):
     try:
         hist = history.get_session(sid)
         layout = None
-        data_rows = None
+        datasets = None
         for rec in reversed(hist):
             meta = rec.get("meta") or {}
             if isinstance(meta, dict) and meta.get("layout"):
                 layout = meta.get("layout")
-                if "data" in meta:
-                    data_rows = meta.get("data")
+                if "datasets" in meta and isinstance(meta["datasets"], dict):
+                    datasets = {
+                        key: _coerce_dataset(value)
+                        for key, value in meta["datasets"].items()
+                    }
+                elif "data" in meta:
+                    datasets = {"data": _coerce_dataset(meta.get("data"))}
                 break
         if not layout:
-            return {"layout": None, "data": []}
+            return {"layout": None, "datasets": {}, "data": []}
 
-        if data_rows is None:
-            # Compute primary data rows from first child source (if any)
-            try:
-                source_key = layout["children"][0].get("source")
-            except Exception:
-                source_key = None
-            data_rows = db.get(source_key, []) if source_key else []
-        return {"layout": layout, "data": data_rows}
+        datasets = _resolve_datasets(layout, datasets, [], None)
+        primary = next(iter(datasets.values()), [])
+        return {"layout": layout, "datasets": datasets, "data": primary}
     except Exception:
-        return {"layout": None, "data": []}
+        return {"layout": None, "datasets": {}, "data": []}

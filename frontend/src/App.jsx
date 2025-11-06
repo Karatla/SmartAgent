@@ -3,7 +3,7 @@ import DynamicRenderer from "./DynamicRenderer";
 import ChatSidebar from "./components/ChatSidebar";
 import "./App.css";
 
-const coerceData = (value) => {
+const coerceArray = (value) => {
   if (Array.isArray(value)) return value;
   if (!value) return [];
   if (typeof value === "object") {
@@ -15,9 +15,53 @@ const coerceData = (value) => {
   return [];
 };
 
+const collectSources = (node, acc = new Set()) => {
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectSources(item, acc));
+    return acc;
+  }
+  if (node && typeof node === "object") {
+    if (node.source) acc.add(node.source);
+    if (Array.isArray(node.children)) {
+      node.children.forEach((child) => collectSources(child, acc));
+    }
+  }
+  return acc;
+};
+
+const normalizeDatasets = (layout, incoming, fallback) => {
+  const normalized = {};
+  if (Array.isArray(incoming)) {
+    normalized.data = coerceArray(incoming);
+  } else if (incoming && typeof incoming === "object") {
+    Object.entries(incoming).forEach(([key, value]) => {
+      normalized[key] = coerceArray(value);
+    });
+  }
+  const sources = Array.from(collectSources(layout));
+  const fallbackArray = coerceArray(fallback);
+  if (normalized.data && sources.length === 1 && !normalized[sources[0]]) {
+    normalized[sources[0]] = normalized.data;
+  }
+  if (fallbackArray.length) {
+    if (!sources.length) {
+      normalized.data = fallbackArray;
+    } else if (sources.length === 1 && !normalized[sources[0]]) {
+      normalized[sources[0]] = fallbackArray;
+    } else if (!Object.keys(normalized).length) {
+      normalized.data = fallbackArray;
+    }
+  }
+  sources.forEach((src) => {
+    if (!normalized[src]) normalized[src] = [];
+  });
+  if (!Object.keys(normalized).length) normalized.data = [];
+  return normalized;
+};
+
 function App() {
   const [layout, setLayout] = useState(null);
-  const [data, setData] = useState(null);
+  const [datasets, setDatasets] = useState({});
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -59,13 +103,18 @@ function App() {
         // ignore history load errors in UI
       });
 
-    // Restore last view (layout + data)
+    // Restore last view (layout + datasets)
     fetch(`http://localhost:8000/last_view?session_id=${encodeURIComponent(sid)}`)
       .then((r) => r.json())
       .then((json) => {
         if (json?.layout) {
           setLayout(json.layout);
-          setData(coerceData(json.data));
+          const datasetMap = normalizeDatasets(
+            json.layout,
+            json.datasets,
+            json.data
+          );
+          setDatasets(datasetMap);
         }
       })
       .catch(() => {});
@@ -103,10 +152,10 @@ function App() {
       });
     };
 
-    const finalize = (layout, data) => {
-      setLayout(layout);
-      setData(coerceData(data));
-      const title = layout?.title || layout?.type || "Updated the view.";
+    const finalize = (nextLayout, normalizedDatasets) => {
+      setLayout(nextLayout);
+      setDatasets(normalizedDatasets);
+      const title = nextLayout?.title || nextLayout?.type || "Updated the view.";
       updateLastAssistant(() => ({ content: `Showing: ${title}` }));
       setLoading(false);
     };
@@ -119,7 +168,12 @@ function App() {
           body: JSON.stringify({ message, session_id: sessionId || "default" }),
         });
         const json = await res.json();
-        finalize(json.layout, json.data);
+        const datasetMap = normalizeDatasets(
+          json.layout,
+          json.datasets,
+          json.data
+        );
+        finalize(json.layout, datasetMap);
         // add any logs/trace we got
         const entries = Array.isArray(json?.logs)
           ? json.logs
@@ -223,7 +277,12 @@ function App() {
       es.addEventListener("final", (ev) => {
         try {
           const payload = JSON.parse(ev.data);
-          finalize(payload.layout, payload.data);
+          const datasetMap = normalizeDatasets(
+            payload.layout,
+            payload.datasets,
+            payload.data
+          );
+          finalize(payload.layout, datasetMap);
         } finally {
           es.close();
           esRef.current = null;
@@ -251,7 +310,7 @@ function App() {
           <div className="flex-1">
             {layout ? (
               <div className="rounded-2xl border border-slate-200 bg-white px-6 py-8 shadow-md">
-                <DynamicRenderer layout={layout} data={data} />
+                <DynamicRenderer layout={layout} datasets={datasets} />
               </div>
             ) : (
               <p className="text-base font-medium text-slate-500 text-center">
