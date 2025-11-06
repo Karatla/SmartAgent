@@ -14,9 +14,9 @@ SYSTEM_PROMPT = (
     "You are a UI runtime planner. Use the tools to inspect data sources, fetch datasets, and assemble layouts.\n"
     "Workflow: optionally call describe_sources, fetch_dataset for each requested source (adding SQL filters as needed), then call build_*_layout to create the Page.\n"
     "when you get data, should always check if data match what user want and fix it"
-    # """
-    # every time if you are going to update/delete/add database,, 
-    # """
+    """
+    every time if you are going to update/delete/add database, please ask User permission and tell user what you gone do and what is consequence, and only do it after user give permission.
+    """
 )
 
 MAX_TURNS = 100  # limit messages from history
@@ -340,7 +340,7 @@ async def ai_layout(query: AIQuery):
         step_txt = f"Calling model: qwen3:8b with tool specs (step {step})"
         trace.append(step_txt)
         logs.append({"type": "thinking", "text": step_txt})
-        response = chat(model="qwen3:8b", messages=messages, tools=tools, think=True)
+        response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
         messages.append(response.message)
 
         if response.message.tool_calls:
@@ -479,7 +479,7 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
             trace_local.append(step_text)
             logs_local.append({"type": "thinking", "text": step_text})
 
-            response = chat(model="qwen3:8b", messages=messages, tools=tools, think=True)
+            response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
             messages.append(response.message)
 
             if response.message.tool_calls:
