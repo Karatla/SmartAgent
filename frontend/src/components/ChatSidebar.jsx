@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export default function ChatSidebar({ messages = [], loading = false }) {
   const scrollRef = useRef(null);
@@ -60,7 +61,9 @@ export default function ChatSidebar({ messages = [], loading = false }) {
                 {m.role === "user" ? "You" : "Assistant"}
               </div>
               <div className="prose prose-sm max-w-none">
-                <ReactMarkdown>{m.content || ""}</ReactMarkdown>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {m.content || ""}
+                </ReactMarkdown>
               </div>
               {(Array.isArray(m.logs) && m.logs.length > 0) ||
               (Array.isArray(m.thinking) && m.thinking.length > 0) ? (
@@ -96,7 +99,11 @@ export default function ChatSidebar({ messages = [], loading = false }) {
                       return (
                         <li key={j} className="rounded bg-slate-100 p-2">
                           <div className="font-semibold mb-0.5">{label}</div>
-                          <div className="break-words">{entry.text}</div>
+                              <div className="prose prose-xs max-w-none">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {entry.text || ""}
+                                </ReactMarkdown>
+                              </div>
                         </li>
                       );
                     })}

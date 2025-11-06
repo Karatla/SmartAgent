@@ -14,67 +14,6 @@ DATASETS: Tuple[str, ...] = (
     "order_items",
 )
 
-TABLE_META: Dict[str, Dict[str, Any]] = {
-    "products": {
-        "primary_key": ["sku"],
-        "required": ["sku", "name", "category", "unit_price", "inventory", "status"],
-        "columns": ["sku", "name", "category", "unit_price", "inventory", "status"],
-    },
-    "sales": {
-        "primary_key": ["date"],
-        "required": ["date", "total", "orders", "avg_order_value", "new_customers"],
-        "columns": ["date", "total", "orders", "avg_order_value", "new_customers"],
-    },
-    "customers": {
-        "primary_key": ["id"],
-        "required": [
-            "id",
-            "name",
-            "email",
-            "segment",
-            "city",
-            "country",
-            "lifetime_value",
-            "joined_date",
-        ],
-        "columns": [
-            "id",
-            "name",
-            "email",
-            "segment",
-            "city",
-            "country",
-            "lifetime_value",
-            "joined_date",
-        ],
-    },
-    "orders": {
-        "primary_key": ["id"],
-        "required": [
-            "id",
-            "customer_id",
-            "order_date",
-            "status",
-            "channel",
-            "total",
-        ],
-        "columns": [
-            "id",
-            "customer_id",
-            "order_date",
-            "status",
-            "channel",
-            "total",
-        ],
-    },
-    "order_items": {
-        "primary_key": ["id"],
-        "required": ["order_id", "product_sku", "quantity", "unit_price"],
-        "columns": ["id", "order_id", "product_sku", "quantity", "unit_price"],
-        "auto": ["id"],
-    },
-}
-
 PRODUCTS: List[Dict[str, Any]] = [
     {
         "sku": "LNR-001",
@@ -564,27 +503,20 @@ class RuntimeDatabase:
             ORDER_ITEMS,
         )
 
-    def get_rows(self, source: str, days: int | None = None) -> List[Dict[str, Any]]:
+    def get_rows(self, source: str) -> List[Dict[str, Any]]:
         source = source.lower()
         if source not in DATASETS:
             return []
 
-        params: Iterable[Any] = ()
         order_clause = DEFAULT_ORDER_BY.get(source)
         query = f"SELECT * FROM {source}"
 
-        if source == "sales" and days is not None and days > 0:
-            query += " ORDER BY date DESC LIMIT ?"
-            params = (days,)
-        elif order_clause:
+        if order_clause:
             query += f" ORDER BY {order_clause}"
 
         with self._connect() as conn:
-            cursor = conn.execute(query, params)
+            cursor = conn.execute(query)
             rows = [dict(row) for row in cursor.fetchall()]
-
-        if source == "sales" and days is not None and days > 0:
-            rows.reverse()
 
         return rows
 
@@ -606,23 +538,28 @@ class RuntimeDatabase:
     def available_sources(self) -> List[str]:
         return list(DATASETS)
 
-    # ----- Mutation helpers -----
-
-    def run_select(self, query: str, params: Iterable[Any] | Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def run_sql(
+        self, query: str, params: Iterable[Any] | Dict[str, Any] | None = None
+    ) -> Dict[str, Any]:
         if not isinstance(query, str):
             return {"ok": False, "message": "Query must be a string."}
 
         cleaned = query.strip()
-        if not cleaned.lower().startswith("select"):
-            return {
-                "ok": False,
-                "message": "Only SELECT statements are allowed via this tool.",
-            }
+        if not cleaned:
+            return {"ok": False, "message": "Query cannot be empty."}
 
         if ";" in cleaned[:-1]:
             return {
                 "ok": False,
                 "message": "Multiple SQL statements are not permitted.",
+            }
+
+        keyword = cleaned.split(maxsplit=1)[0].lower()
+        allowed = {"select", "with", "insert", "update", "delete"}
+        if keyword not in allowed:
+            return {
+                "ok": False,
+                "message": f"Only SELECT/INSERT/UPDATE/DELETE statements are allowed (got '{keyword}').",
             }
 
         bound_params = params or ()
@@ -632,178 +569,25 @@ class RuntimeDatabase:
                 cursor = conn.execute(cleaned, bound_params)
             except Exception as exc:
                 return {"ok": False, "message": f"Query failed: {exc}"}
-            columns = [desc[0] for desc in cursor.description] if cursor.description else []
-            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-        return {"ok": True, "rows": rows, "columns": columns}
-
-    def _get_meta(self, source: str) -> Dict[str, Any]:
-        return TABLE_META.get(source)
-
-    def _missing_required(
-        self, meta: Dict[str, Any], payload: Dict[str, Any]
-    ) -> List[str]:
-        required = meta.get("required", [])
-        missing: List[str] = []
-        for field in required:
-            if payload.get(field) in (None, ""):
-                missing.append(field)
-        return missing
-
-    def _normalize_columns(
-        self, meta: Dict[str, Any], payload: Dict[str, Any]
-    ) -> List[str]:
-        columns = meta.get("columns", [])
-        return [col for col in columns if col in payload]
-
-    def _fetch_by_pk(
-        self, conn: sqlite3.Connection, source: str, meta: Dict[str, Any], values: Dict[str, Any]
-    ) -> Dict[str, Any] | None:
-        pk_fields: List[str] = meta.get("primary_key", [])
-        if not pk_fields or not all(field in values for field in pk_fields):
-            return None
-        where_clause = " AND ".join([f"{field} = ?" for field in pk_fields])
-        params = [values[field] for field in pk_fields]
-        row = conn.execute(
-            f"SELECT * FROM {source} WHERE {where_clause} LIMIT 1",
-            params,
-        ).fetchone()
-        return dict(row) if row else None
-
-    def insert_row(self, source: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        meta = self._get_meta(source)
-        if not meta:
-            return {"ok": False, "message": f"Unknown source '{source}'"}
-
-        missing = self._missing_required(meta, payload)
-        if missing:
-            return {
-                "ok": False,
-                "message": f"Missing required fields for '{source}'",
-                "missing": missing,
-            }
-
-        columns = self._normalize_columns(meta, payload)
-        if not columns:
-            return {
-                "ok": False,
-                "message": f"No valid columns provided for '{source}'",
-                "missing": meta.get("required", []),
-            }
-
-        placeholders = ", ".join(["?"] * len(columns))
-        col_names = ", ".join(columns)
-
-        with self._connect() as conn:
-            cursor = conn.execute(
-                f"INSERT INTO {source} ({col_names}) VALUES ({placeholders})",
-                [payload[col] for col in columns],
-            )
-            pk_fields = meta.get("primary_key", [])
-            pk_values = {field: payload.get(field) for field in pk_fields}
-
-            auto_fields = meta.get("auto", [])
-            for field in auto_fields:
-                if field in pk_fields and pk_values.get(field) in (None, ""):
-                    pk_values[field] = cursor.lastrowid
-
-            row = self._fetch_by_pk(conn, source, meta, pk_values) if pk_fields else None
-
-        dataset = self.get_rows(source)
-        return {
-            "ok": True,
-            "message": f"Inserted row into '{source}'",
-            "dataset": dataset,
-            "row": row,
-        }
-
-    def update_row(self, source: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        meta = self._get_meta(source)
-        if not meta:
-            return {"ok": False, "message": f"Unknown source '{source}'"}
-
-        pk_fields: List[str] = meta.get("primary_key", [])
-        if not pk_fields:
-            return {"ok": False, "message": f"No primary key defined for '{source}'"}
-
-        missing_keys = [field for field in pk_fields if payload.get(field) in (None, "")]
-        if missing_keys:
-            return {
-                "ok": False,
-                "message": f"Missing primary key fields for '{source}'",
-                "missing": missing_keys,
-            }
-
-        updates = {
-            key: value
-            for key, value in payload.items()
-            if key in meta.get("columns", []) and key not in pk_fields
-        }
-
-        if not updates:
-            return {
-                "ok": False,
-                "message": f"No updatable fields provided for '{source}'",
-            }
-
-        set_clause = ", ".join([f"{col} = ?" for col in updates])
-        where_clause = " AND ".join([f"{field} = ?" for field in pk_fields])
-
-        with self._connect() as conn:
-            params = list(updates.values()) + [payload[field] for field in pk_fields]
-            cursor = conn.execute(
-                f"UPDATE {source} SET {set_clause} WHERE {where_clause}",
-                params,
-            )
-            if cursor.rowcount == 0:
+            if keyword in {"select", "with"}:
+                columns = (
+                    [desc[0] for desc in cursor.description] if cursor.description else []
+                )
+                rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
                 return {
-                    "ok": False,
-                    "message": f"No matching row found in '{source}' for provided key.",
-                }
-            row = self._fetch_by_pk(conn, source, meta, payload)
-
-        dataset = self.get_rows(source)
-        return {
-            "ok": True,
-            "message": f"Updated row in '{source}'",
-            "dataset": dataset,
-            "row": row,
-        }
-
-    def delete_row(self, source: str, key_fields: Dict[str, Any]) -> Dict[str, Any]:
-        meta = self._get_meta(source)
-        if not meta:
-            return {"ok": False, "message": f"Unknown source '{source}'"}
-
-        pk_fields: List[str] = meta.get("primary_key", [])
-        if not pk_fields:
-            return {"ok": False, "message": f"No primary key defined for '{source}'"}
-
-        missing_keys = [field for field in pk_fields if key_fields.get(field) in (None, "")]
-        if missing_keys:
-            return {
-                "ok": False,
-                "message": f"Missing primary key fields for '{source}'",
-                "missing": missing_keys,
-            }
-
-        where_clause = " AND ".join([f"{field} = ?" for field in pk_fields])
-        params = [key_fields[field] for field in pk_fields]
-
-        with self._connect() as conn:
-            cursor = conn.execute(
-                f"DELETE FROM {source} WHERE {where_clause}",
-                params,
-            )
-            if cursor.rowcount == 0:
-                return {
-                    "ok": False,
-                    "message": f"No matching row found in '{source}' for provided key.",
+                    "ok": True,
+                    "rows": rows,
+                    "columns": columns,
+                    "rowcount": len(rows),
+                    "command": keyword,
                 }
 
-        dataset = self.get_rows(source)
-        return {
-            "ok": True,
-            "message": f"Deleted row from '{source}'",
-            "dataset": dataset,
-        }
+            conn.commit()
+            return {
+                "ok": True,
+                "rows": [],
+                "columns": [],
+                "rowcount": cursor.rowcount,
+                "command": keyword,
+            }

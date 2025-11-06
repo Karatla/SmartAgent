@@ -82,12 +82,18 @@ def test_ai_layout_orders_table_uses_runtime_database(client, monkeypatch):
 
 
 def test_ai_layout_sales_chart_respects_day_filters(client, monkeypatch):
-    """Regression test: ensure fetch_dataset tool trims sales rows via SQLite."""
+    """Regression test: ensure query-based fetches can limit sales data."""
 
     responses = [
         make_response(
             tool_calls=[
-                make_tool_call("fetch_dataset", {"source": "sales", "days": 7})
+                make_tool_call(
+                    "fetch_dataset",
+                    {
+                        "query": "SELECT * FROM sales ORDER BY date DESC LIMIT 7",
+                        "alias": "sales_week",
+                    },
+                )
             ]
         ),
         make_response(
@@ -95,7 +101,7 @@ def test_ai_layout_sales_chart_respects_day_filters(client, monkeypatch):
                 make_tool_call(
                     "build_chart_layout",
                     {
-                        "source": "sales",
+                        "source": "sales_week",
                         "chart_type": "line",
                         "metric": "total",
                         "title": "Weekly Sales",
@@ -121,58 +127,14 @@ def test_ai_layout_sales_chart_respects_day_filters(client, monkeypatch):
     payload = response.json()
 
     assert payload["layout"]["title"] == "Weekly Sales"
-    assert "sales" in payload["datasets"]
+    assert "sales_week" in payload["datasets"]
 
-    sales_rows = payload["datasets"]["sales"]
+    sales_rows = payload["datasets"]["sales_week"]
     assert len(sales_rows) == 7
     assert all("avg_order_value" in row for row in sales_rows)
 
     dates = [row["date"] for row in sales_rows]
     assert dates == sorted(dates)
-
-
-def test_add_record_reports_missing_fields(client):
-    """New insert tool should remind users about required fields."""
-
-    response = backend_main.add_record("products", {"sku": "NEW-100"})
-    assert response["type"] == "Text"
-    assert "Missing fields" in response["content"]
-    assert "name" in response["content"]
-
-
-def test_mutation_flow_insert_update_delete(client):
-    """Full mutation cycle against the runtime database."""
-
-    insert_payload = {
-        "sku": "NEW-200",
-        "name": "Quantum Speaker",
-        "category": "Audio",
-        "unit_price": 149.0,
-        "inventory": 45,
-        "status": "active",
-    }
-    insert_result = backend_main.add_record("products", insert_payload)
-    assert insert_result["meta"]["action"] == "insert"
-    products = insert_result["datasets"]["products"]
-    assert any(row["sku"] == "NEW-200" for row in products)
-
-    update_payload = {
-        "sku": "NEW-200",
-        "status": "backorder",
-        "inventory": 30,
-    }
-    update_result = backend_main.update_record("products", update_payload)
-    assert update_result["meta"]["action"] == "update"
-    updated_row = next(
-        row for row in update_result["datasets"]["products"] if row["sku"] == "NEW-200"
-    )
-    assert updated_row["status"] == "backorder"
-    assert updated_row["inventory"] == 30
-
-    delete_result = backend_main.remove_record("products", {"sku": "NEW-200"})
-    assert delete_result["meta"]["action"] == "delete"
-    product_skus = [row["sku"] for row in delete_result["datasets"]["products"]]
-    assert "NEW-200" not in product_skus
 
 
 def test_fetch_dataset_query_path(client):
@@ -194,8 +156,56 @@ def test_fetch_dataset_query_path(client):
 
 
 def test_fetch_dataset_query_validation(client):
-    """Non-SELECT statements should be rejected."""
+    """Disallow statements outside SELECT/INSERT/UPDATE/DELETE."""
 
-    result = backend_main.fetch_dataset(query="DELETE FROM products")
+    result = backend_main.fetch_dataset(query="DROP TABLE products")
     assert result["type"] == "Text"
-    assert "Only SELECT statements" in result["content"]
+    assert "Only SELECT/INSERT/UPDATE/DELETE" in result["content"]
+
+
+def test_fetch_dataset_handles_dml_queries(client):
+    """Ensure INSERT/UPDATE/DELETE can be executed via fetch_dataset."""
+
+    insert = backend_main.fetch_dataset(
+        query="""
+        INSERT INTO products (sku, name, category, unit_price, inventory, status)
+        VALUES (:sku, :name, :category, :unit_price, :inventory, :status)
+        """,
+        params={
+            "sku": "NEW-300",
+            "name": "Photon Lamp",
+            "category": "Lighting",
+            "unit_price": 59.0,
+            "inventory": 25,
+            "status": "active",
+        },
+    )
+    assert insert["type"] == "Text"
+    assert "INSERT" in insert["content"]
+
+    update = backend_main.fetch_dataset(
+        query="UPDATE products SET inventory = :inv WHERE sku = :sku",
+        params={"inv": 15, "sku": "NEW-300"},
+    )
+    assert update["type"] == "Text"
+    assert "UPDATE" in update["content"]
+
+    result = backend_main.fetch_dataset(
+        query="SELECT sku, inventory FROM products WHERE sku = :sku",
+        params={"sku": "NEW-300"},
+        alias="single_product",
+    )
+    rows = result["datasets"]["single_product"]
+    assert rows and rows[0]["inventory"] == 15
+
+    delete = backend_main.fetch_dataset(
+        query="DELETE FROM products WHERE sku = :sku", params={"sku": "NEW-300"}
+    )
+    assert delete["type"] == "Text"
+    assert "DELETE" in delete["content"]
+
+    confirm = backend_main.fetch_dataset(
+        query="SELECT sku FROM products WHERE sku = :sku",
+        params={"sku": "NEW-300"},
+    )
+    assert not confirm["datasets"]["query_results"]

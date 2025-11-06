@@ -80,7 +80,7 @@ User → (Chat or Voice)
 | Component                      | Description                                                     |
 | ------------------------------ | --------------------------------------------------------------- |
 | `backend/main.py`              | FastAPI server that simulates AI responses (or integrates GPT). |
-| `backend/database.py`          | SQLite data layer with seeded datasets, CRUD helpers, and safe SELECT execution. |
+| `backend/database.py`          | SQLite data layer with seeded datasets plus a safe SQL runner for SELECT/INSERT/UPDATE/DELETE. |
 | `frontend/App.jsx`             | Main UI where user types requests.                              |
 | `frontend/DynamicRenderer.jsx` | Renders UI from layout JSON.                                    |
 | `frontend/components/*`        | Table and Chart React components.                               |

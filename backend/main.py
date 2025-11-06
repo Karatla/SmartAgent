@@ -12,12 +12,12 @@ from backend.history_store import HistoryStore
 
 SYSTEM_PROMPT = (
     "You are a UI runtime planner. Use the tools to inspect data sources, fetch datasets, and assemble layouts.\n"
-    "Workflow: optionally call describe_sources, fetch_dataset for each requested source (with filters like days), then call build_*_layout to create the Page.\n"
+    "Workflow: optionally call describe_sources, fetch_dataset for each requested source (adding SQL filters as needed), then call build_*_layout to create the Page.\n"
     "when you get data, should always check if data match what user want and fix it"
 )
 
-MAX_TURNS = 20  # limit messages from history
-MAX_TOOL_STEPS = 8  # prevent infinite tool loops
+MAX_TURNS = 100  # limit messages from history
+MAX_TOOL_STEPS = 20  # prevent infinite tool loops
 
 
 def build_llm_messages(session_id: str):
@@ -161,7 +161,6 @@ history = HistoryStore("backend/chat_history.jsonl")
 
 def fetch_dataset(
     source: str | None = None,
-    days: int | None = None,
     query: str | None = None,
     params: dict | list | tuple | None = None,
     alias: str | None = None,
@@ -170,35 +169,46 @@ def fetch_dataset(
     Retrieve rows for the planner with either convenience lookups or direct SQL queries.
 
     Tips for the model:
-    - Prefer the `source` + optional `days` arguments when you just need one of the known datasets
+    - Prefer the `source` argument when you just need one of the known datasets
       (`products`, `sales`, `customers`, `orders`, `order_items`). The response automatically returns
       the named dataset with all columns.
     - When you need filtered/aggregated data, submit a single SELECT statement via `query`.
-      You may bind parameters safely using `params` (dict or list/tuple). Only SELECT queries are allowed.
+      You may bind parameters safely using `params` (dict or list/tuple). INSERT/UPDATE/DELETE are also
+      permitted when you need to mutate data; the tool will echo back how many rows were affected.
     - Use `alias` to choose the dataset key that downstream layout tools should reference. Otherwise the
       tool will fall back to the provided `source` or `query_results`.
     """
 
     if query:
-        result = database.run_select(query, params)
+        result = database.run_sql(query, params)
         if not result.get("ok"):
             message = result.get("message") or "Query failed."
             return {"type": "Text", "content": message}
 
         dataset_name = alias or source or "query_results"
         rows = result.get("rows", [])
-        meta = {
-            "source": dataset_name,
-            "query": query,
-            "params": params,
-            "rows": len(rows),
-            "columns": result.get("columns", []),
-        }
-        if alias and source and alias != source:
-            meta["requested_source"] = source
+        command = (result.get("command") or "").upper() or "STATEMENT"
+        if rows:
+            meta = {
+                "source": dataset_name,
+                "query": query,
+                "params": params,
+                "rows": len(rows),
+                "columns": result.get("columns", []),
+                "command": command,
+            }
+            if alias and source and alias != source:
+                meta["requested_source"] = source
+            return {
+                "datasets": {dataset_name: rows},
+                "meta": meta,
+            }
+
+        affected = result.get("rowcount", 0)
+        message = f"{command} executed; {affected} row(s) affected."
         return {
-            "datasets": {dataset_name: rows},
-            "meta": meta,
+            "type": "Text",
+            "content": message,
         }
 
     if not source:
@@ -207,14 +217,13 @@ def fetch_dataset(
             "content": "fetch_dataset requires either a source or a SELECT query.",
         }
 
-    rows = database.get_rows(source, days=days)
+    rows = database.get_rows(source)
 
     return {
         "datasets": {source: rows},
         "meta": {
             "source": source,
             "rows": len(rows),
-            "days": days,
         },
     }
 
@@ -291,81 +300,11 @@ def describe_sources() -> dict:
     return {"datasets": {}, "meta": {"sources": summary}}
 
 
-def _mutation_response(action: str, source: str, result: dict) -> dict:
-    message = result.get("message", "")
-    if not result.get("ok"):
-        missing = result.get("missing")
-        if missing:
-            missing_list = ", ".join(missing)
-            message = f"{message}. Missing fields: {missing_list}" if message else f"Missing fields: {missing_list}"
-        return {"type": "Text", "content": message or f"Failed to {action} data for '{source}'"}
-
-    response: dict = {
-        "datasets": {source: result.get("dataset", [])},
-        "meta": {
-            "action": action,
-            "source": source,
-            "message": message,
-        },
-    }
-    row = result.get("row")
-    if row is not None:
-        response["meta"]["row"] = row
-    if message:
-        response["meta"]["notice"] = message
-    return response
-
-
-def add_record(source: str, values: dict) -> dict:
-    """
-    Insert a new record into the runtime database.
-
-    Tips for the model:
-    - Provide all required fields for the chosen `source`; missing attributes are echoed back for correction.
-    - The tool returns the refreshed dataset under the same source name along with a `row` echo for the insert.
-    - Use this sparingly and only when the user explicitly requests data creation.
-    """
-
-    result = database.insert_row(source, values or {})
-    return _mutation_response("insert", source, result)
-
-
-def update_record(source: str, values: dict) -> dict:
-    """
-    Update an existing record using its primary key.
-
-    Tips for the model:
-    - Include the full primary key for the table (e.g., `sku` for products, `id` for customers).
-    - Supply only the fields you intend to modify alongside the key(s); the tool keeps other columns intact.
-    - Useful for status changes, corrections, or inventory adjustments requested by the user.
-    """
-
-    result = database.update_row(source, values or {})
-    return _mutation_response("update", source, result)
-
-
-def remove_record(source: str, keys: dict) -> dict:
-    """
-    Delete a record identified by its primary key.
-
-    Tips for the model:
-    - Provide the primary key fields for the target table; missing keys are reported back.
-    - The tool returns the updated dataset for confirmation.
-    - Use only when the user explicitly asks to remove data.
-    """
-
-    result = database.delete_row(source, keys or {})
-    return _mutation_response("delete", source, result)
-
-
 tools = [
     fetch_dataset,
     build_table_layout,
     build_chart_layout,
     describe_sources,
-    add_record,
-    update_record,
-    remove_record,
 ]
 
 ### -------- Request Model -------- ###
