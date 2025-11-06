@@ -1,7 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import DynamicRenderer from "./DynamicRenderer";
 import ChatSidebar from "./components/ChatSidebar";
 import "./App.css";
+
+const formatTime = (iso) => {
+  if (!iso) return "";
+  const date = new Date(iso);
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+};
 
 const coerceArray = (value) => {
   if (Array.isArray(value)) return value;
@@ -68,6 +76,24 @@ function App() {
   const [error, setError] = useState("");
   const esRef = useRef(null);
   const [sessionId, setSessionId] = useState(null);
+  const lastModelLog = useMemo(() => {
+    for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
+      const entry = messages[idx];
+      if (entry.role !== "assistant") continue;
+      const modelLines =
+        Array.isArray(entry.logs) && entry.logs.length > 0
+          ? entry.logs.filter((log) => log.type === "model")
+          : [];
+      if (modelLines.length) {
+        const last = modelLines[modelLines.length - 1];
+        return {
+          text: last.text || "",
+          ts: last.ts || entry.timestamp,
+        };
+      }
+    }
+    return null;
+  }, [messages]);
 
   // Initialize session and load chat history on first render
   useEffect(() => {
@@ -92,9 +118,15 @@ function App() {
               .map((m) => ({
                 role: m.role,
                 content: m.content,
+                timestamp: m.ts,
                 thinking: Array.isArray(m.thinking) ? m.thinking : [],
                 logs:
-                  m.meta && Array.isArray(m.meta.logs) ? m.meta.logs : [],
+                  m.meta && Array.isArray(m.meta.logs)
+                    ? m.meta.logs.map((log) => ({
+                        ...log,
+                        ts: log.ts || m.ts,
+                      }))
+                    : [],
               }))
           : [];
         setMessages(msgs);
@@ -128,15 +160,23 @@ function App() {
     setInput("");
 
     // Append user message to chat
+    const userTimestamp = new Date().toISOString();
     setMessages((prev) => [
       ...prev,
-      { role: "user", content: message, thinking: [], logs: [] },
+      { role: "user", content: message, thinking: [], logs: [], timestamp: userTimestamp },
     ]);
 
     // Insert assistant skeleton to stream thinking lines
+    const assistantTimestamp = new Date().toISOString();
     setMessages((prev) => [
       ...prev,
-      { role: "assistant", content: "Working…", thinking: [], logs: [] },
+      {
+        role: "assistant",
+        content: "Working…",
+        thinking: [],
+        logs: [],
+        timestamp: assistantTimestamp,
+      },
     ]);
 
     const updateLastAssistant = (updater) => {
@@ -178,7 +218,11 @@ function App() {
         const entries = Array.isArray(json?.logs)
           ? json.logs
           : Array.isArray(json?.trace)
-          ? json.trace.map((t) => ({ type: "thinking", text: t }))
+          ? json.trace.map((t) => ({
+              type: "thinking",
+              text: t,
+              ts: new Date().toISOString(),
+            }))
           : [];
         entries.forEach((entry) => {
           updateLastAssistant((curr) => ({
@@ -186,7 +230,10 @@ function App() {
               entry.type === "thinking"
                 ? [...(curr.thinking || []), entry.text]
                 : curr.thinking || [],
-            logs: [...(curr.logs || []), entry],
+            logs: [
+              ...(curr.logs || []),
+              { ...entry, ts: entry.ts || new Date().toISOString() },
+            ],
           }));
         });
       } catch (err) {
@@ -202,7 +249,11 @@ function App() {
           thinking: [...(curr.thinking || []), ...errorSteps],
           logs: [
             ...(curr.logs || []),
-            ...errorSteps.map((text) => ({ type: "thinking", text })),
+            ...errorSteps.map((text) => ({
+              type: "thinking",
+              text,
+              ts: new Date().toISOString(),
+            })),
           ],
         }));
         setLoading(false);
@@ -227,7 +278,7 @@ function App() {
           if (!line) return;
           updateLastAssistant((curr) => ({
             thinking: [...(curr.thinking || []), line],
-            logs: [...(curr.logs || []), { type: "thinking", text: line }],
+            logs: [...(curr.logs || []), { type: "thinking", text: line, ts: new Date().toISOString() }],
           }));
         } catch (_) {
           // ignore bad lines
@@ -239,7 +290,7 @@ function App() {
           const line = payload?.text || "";
           if (!line) return;
           updateLastAssistant((curr) => ({
-            logs: [...(curr.logs || []), { type: "tool", text: line }],
+            logs: [...(curr.logs || []), { type: "tool", text: line, ts: new Date().toISOString() }],
           }));
         } catch (_) {}
       });
@@ -249,7 +300,7 @@ function App() {
           const line = payload?.text || "";
           if (!line) return;
           updateLastAssistant((curr) => ({
-            logs: [...(curr.logs || []), { type: "tool_result", text: line }],
+            logs: [...(curr.logs || []), { type: "tool_result", text: line, ts: new Date().toISOString() }],
           }));
         } catch (_) {}
       });
@@ -259,7 +310,7 @@ function App() {
           const line = payload?.text || "";
           if (!line) return;
           updateLastAssistant((curr) => ({
-            logs: [...(curr.logs || []), { type: "model", text: line }],
+            logs: [...(curr.logs || []), { type: "model", text: line, ts: new Date().toISOString() }],
           }));
         } catch (_) {}
       });
@@ -269,7 +320,7 @@ function App() {
           const line = payload?.text || "";
           if (!line) return;
           updateLastAssistant((curr) => ({
-            logs: [...(curr.logs || []), { type: "data", text: line }],
+            logs: [...(curr.logs || []), { type: "data", text: line, ts: new Date().toISOString() }],
           }));
         } catch (_) {}
       });
@@ -323,6 +374,27 @@ function App() {
 
       <footer className="px-4 pb-8 lg:pr-[440px]">
         <div className="mx-auto w-full max-w-6xl space-y-2">
+          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+            <div className="text-[11px] uppercase tracking-wide text-slate-500">
+              Model Insight
+            </div>
+            {lastModelLog ? (
+              <>
+                <div className="prose prose-sm mt-1 max-w-none text-slate-800">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {lastModelLog.text}
+                  </ReactMarkdown>
+                </div>
+                <p className="text-xs text-slate-500 mt-1">
+                  {formatTime(lastModelLog.ts)}
+                </p>
+              </>
+            ) : (
+              <p className="mt-1 text-sm text-slate-500">
+                No model output yet.
+              </p>
+            )}
+          </div>
           {error && (
             <p className="text-sm font-medium text-rose-500">{error}</p>
           )}

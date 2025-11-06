@@ -14,6 +14,9 @@ SYSTEM_PROMPT = (
     "You are a UI runtime planner. Use the tools to inspect data sources, fetch datasets, and assemble layouts.\n"
     "Workflow: optionally call describe_sources, fetch_dataset for each requested source (adding SQL filters as needed), then call build_*_layout to create the Page.\n"
     "when you get data, should always check if data match what user want and fix it"
+    # """
+    # every time if you are going to update/delete/add database,, 
+    # """
 )
 
 MAX_TURNS = 100  # limit messages from history
