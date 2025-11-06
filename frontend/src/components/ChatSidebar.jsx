@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 
 export default function ChatSidebar({ messages = [], loading = false }) {
   const scrollRef = useRef(null);
@@ -58,7 +59,9 @@ export default function ChatSidebar({ messages = [], loading = false }) {
               <div className="text-[11px] uppercase tracking-wide opacity-70 mb-0.5">
                 {m.role === "user" ? "You" : "Assistant"}
               </div>
-              <div className="whitespace-pre-wrap break-words">{m.content}</div>
+              <div className="prose prose-sm max-w-none">
+                <ReactMarkdown>{m.content || ""}</ReactMarkdown>
+              </div>
               {(Array.isArray(m.logs) && m.logs.length > 0) ||
               (Array.isArray(m.thinking) && m.thinking.length > 0) ? (
                 <details
