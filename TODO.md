@@ -95,7 +95,7 @@
 
 ### Tasks
 
-* [ ] Replace `db.json` with PostgreSQL / SQLite.
+* [x] Replace `db.json` with PostgreSQL / SQLite (seeded SQLite runtime DB).
 * [ ] Add ORM (SQLAlchemy or Prisma) with schema introspection.
 * [ ] Let AI query data dynamically via ORM functions.
 * [ ] Secure DB access and sanitize queries.

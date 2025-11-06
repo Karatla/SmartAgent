@@ -1,17 +1,19 @@
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from ollama import chat
 import json
-from fastapi.responses import StreamingResponse
 from typing import Optional
 
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from ollama import chat
+from pydantic import BaseModel
+
+from backend.database import RuntimeDatabase
 from backend.history_store import HistoryStore
 
 SYSTEM_PROMPT = (
     "You are a UI runtime planner. Use the tools to inspect data sources, fetch datasets, and assemble layouts.\n"
     "Workflow: optionally call describe_sources, fetch_dataset for each requested source (with filters like days), then call build_*_layout to create the Page.\n"
-    "Always return the final layout via a tool call. Never reply with freeform JSON or text."
+    "when you get data, should always check if data match what user want and fix it"
 )
 
 MAX_TURNS = 20  # limit messages from history
@@ -120,7 +122,7 @@ def _resolve_datasets(layout, candidate_datasets, logs, trace=None):
 
     for src in sources:
         if src not in normalized:
-            rows = db.get(src, [])
+            rows = database.get_rows(src)
             normalized[src] = rows
             msg = f"Loaded dataset for '{src}' from DB ({len(rows)} rows)"
             logs.append({"type": "data", "text": msg})
@@ -149,9 +151,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mock database
-with open("backend/db.json") as f:
-    db = json.load(f)
+# SQLite-backed dataset store
+database = RuntimeDatabase()
 
 # Chat history store (JSONL-backed)
 history = HistoryStore("backend/chat_history.jsonl")
@@ -161,19 +162,7 @@ history = HistoryStore("backend/chat_history.jsonl")
 def fetch_dataset(source: str, days: int | None = None) -> dict:
     """Return dataset rows for a given source with optional day slicing."""
 
-    rows = db.get(source, [])
-    if not isinstance(rows, list):
-        rows = []
-
-    if days is not None and days > 0:
-        trimmed = []
-        for row in reversed(rows):
-            if isinstance(row, dict) and "date" in row:
-                trimmed.append(row)
-                if len(trimmed) >= days:
-                    break
-        if trimmed:
-            rows = list(reversed(trimmed))
+    rows = database.get_rows(source, days=days)
 
     return {
         "datasets": {source: rows},
@@ -231,21 +220,65 @@ def build_chart_layout(
 def describe_sources() -> dict:
     """Return available data sources and fields."""
 
-    summary = {}
-    for key, rows in db.items():
-        fields = set()
-        if isinstance(rows, list):
-            for row in rows[:3]:
-                if isinstance(row, dict):
-                    fields.update(row.keys())
-        summary[key] = {
-            "rows": len(rows) if isinstance(rows, list) else 0,
-            "fields": sorted(fields),
-        }
+    summary = database.describe_sources()
     return {"datasets": {}, "meta": {"sources": summary}}
 
 
-tools = [fetch_dataset, build_table_layout, build_chart_layout, describe_sources]
+def _mutation_response(action: str, source: str, result: dict) -> dict:
+    message = result.get("message", "")
+    if not result.get("ok"):
+        missing = result.get("missing")
+        if missing:
+            missing_list = ", ".join(missing)
+            message = f"{message}. Missing fields: {missing_list}" if message else f"Missing fields: {missing_list}"
+        return {"type": "Text", "content": message or f"Failed to {action} data for '{source}'"}
+
+    response: dict = {
+        "datasets": {source: result.get("dataset", [])},
+        "meta": {
+            "action": action,
+            "source": source,
+            "message": message,
+        },
+    }
+    row = result.get("row")
+    if row is not None:
+        response["meta"]["row"] = row
+    if message:
+        response["meta"]["notice"] = message
+    return response
+
+
+def add_record(source: str, values: dict) -> dict:
+    """Insert a new record into the runtime database."""
+
+    result = database.insert_row(source, values or {})
+    return _mutation_response("insert", source, result)
+
+
+def update_record(source: str, values: dict) -> dict:
+    """Update an existing record driven by primary key fields."""
+
+    result = database.update_row(source, values or {})
+    return _mutation_response("update", source, result)
+
+
+def remove_record(source: str, keys: dict) -> dict:
+    """Delete an existing record by primary key."""
+
+    result = database.delete_row(source, keys or {})
+    return _mutation_response("delete", source, result)
+
+
+tools = [
+    fetch_dataset,
+    build_table_layout,
+    build_chart_layout,
+    describe_sources,
+    add_record,
+    update_record,
+    remove_record,
+]
 
 ### -------- Request Model -------- ###
 
@@ -277,7 +310,7 @@ async def ai_layout(query: AIQuery):
         step_txt = f"Calling model: qwen3:8b with tool specs (step {step})"
         trace.append(step_txt)
         logs.append({"type": "thinking", "text": step_txt})
-        response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
+        response = chat(model="qwen3:8b", messages=messages, tools=tools, think=True)
         messages.append(response.message)
 
         if response.message.tool_calls:
@@ -416,7 +449,7 @@ async def ai_layout_stream(message: str, session_id: Optional[str] = Query(None)
             trace_local.append(step_text)
             logs_local.append({"type": "thinking", "text": step_text})
 
-            response = chat(model="qwen3:8b", messages=messages, tools=tools, think=False)
+            response = chat(model="qwen3:8b", messages=messages, tools=tools, think=True)
             messages.append(response.message)
 
             if response.message.tool_calls:
