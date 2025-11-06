@@ -11,3 +11,4 @@ wheels/
 
 # Generated databases
 backend/*.db
+backend/chat_history.jsonl
