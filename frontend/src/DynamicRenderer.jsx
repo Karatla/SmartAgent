@@ -33,6 +33,7 @@ export default function DynamicRenderer({ layout, datasets }) {
         <SalesChart
           data={resolveData(datasets, layout.source)}
           chartType={layout.chartType}
+          metric={layout.metric}
         />
       );
 

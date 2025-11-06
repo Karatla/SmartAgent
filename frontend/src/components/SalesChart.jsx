@@ -1,9 +1,11 @@
 import { BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 
-export default function SalesChart({ data }) {
+export default function SalesChart({ data, chartType = "bar", metric = "total" }) {
   if (!Array.isArray(data) || data.length === 0) {
     return <p className="text-sm text-gray-500">No sales data available.</p>;
   }
+
+  const valueKey = metric && typeof metric === "string" ? metric : "total";
 
   return (
     <div className="flex w-full items-center justify-center py-2">
@@ -12,7 +14,7 @@ export default function SalesChart({ data }) {
         <XAxis dataKey="date" />
         <YAxis />
         <Tooltip />
-        <Bar dataKey="total" fill="#4f46e5" />
+        <Bar dataKey={valueKey} fill="#4f46e5" />
       </BarChart>
     </div>
   );

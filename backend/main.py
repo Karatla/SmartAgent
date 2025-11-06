@@ -9,9 +9,9 @@ from typing import Optional
 from backend.history_store import HistoryStore
 
 SYSTEM_PROMPT = (
-    "You are a UI agent. Your job is to help user and call tools to return layout JSON.\n"
-    #"DO NOT explain anything. Do NOT return markdown or freeform text.\n"
-    #"Only call tools or return layout as tool results."
+    "You are a UI runtime planner. Use the tools to inspect data sources, fetch datasets, and assemble layouts.\n"
+    "Workflow: optionally call describe_sources, fetch_dataset for each requested source (with filters like days), then call build_*_layout to create the Page.\n"
+    "Always return the final layout via a tool call. Never reply with freeform JSON or text."
 )
 
 MAX_TURNS = 20  # limit messages from history
@@ -70,6 +70,13 @@ def _extract_layout_payload(payload):
                 datasets["data"] = _coerce_dataset(raw_datasets)
             if "data" in payload:
                 datasets.setdefault("data", _coerce_dataset(payload.get("data")))
+        elif "datasets" in payload:
+            raw_datasets = payload.get("datasets")
+            if isinstance(raw_datasets, dict):
+                for key, value in raw_datasets.items():
+                    datasets[key] = _coerce_dataset(value)
+            elif raw_datasets is not None:
+                datasets["data"] = _coerce_dataset(raw_datasets)
         else:
             layout = payload
     return layout, datasets
@@ -151,48 +158,94 @@ history = HistoryStore("backend/chat_history.jsonl")
 
 ### -------- Tool Functions -------- ###
 
-def get_product_table() -> dict:
-    """Return a JSON layout for the product table."""
-    layout = {
-        "type": "Page",
-        "title": "Product List",
-        "children": [
-            {"type": "Table", "source": "products"}
-        ],
-    }
+def fetch_dataset(source: str, days: int | None = None) -> dict:
+    """Return dataset rows for a given source with optional day slicing."""
+
+    rows = db.get(source, [])
+    if not isinstance(rows, list):
+        rows = []
+
+    if days is not None and days > 0:
+        trimmed = []
+        for row in reversed(rows):
+            if isinstance(row, dict) and "date" in row:
+                trimmed.append(row)
+                if len(trimmed) >= days:
+                    break
+        if trimmed:
+            rows = list(reversed(trimmed))
+
     return {
-        "layout": layout,
-        "datasets": {
-            "products": db.get("products", []),
+        "datasets": {source: rows},
+        "meta": {
+            "source": source,
+            "rows": len(rows),
+            "days": days,
         },
     }
 
-def get_sales_chart(period: str = "month") -> dict:
-    """Return a sales chart layout for a specific period.
 
-    Args:
-        period: one of "today", "week", or "month"
-    """
-    layout = {
-        "type": "Page",
-        "title": f"Sales Chart ({period})",
-        "children": [
-            {
-                "type": "Chart",
-                "chartType": "bar",
-                "source": "sales",
-            }
-        ],
-    }
-    data = db.get("sales", [])
+def build_table_layout(source: str, title: str | None = None) -> dict:
+    """Create a table layout referencing a data source."""
+
+    title = title or f"{source.title()} Table"
     return {
-        "layout": layout,
-        "datasets": {
-            "sales": data,
-        },
+        "layout": {
+            "type": "Page",
+            "title": title,
+            "children": [
+                {
+                    "type": "Table",
+                    "source": source,
+                }
+            ],
+        }
     }
 
-tools = [get_product_table, get_sales_chart]
+
+def build_chart_layout(
+    source: str,
+    chart_type: str = "bar",
+    metric: str = "total",
+    title: str | None = None,
+) -> dict:
+    """Create a single-chart page for a dataset."""
+
+    title = title or f"{source.title()} {chart_type.title()}"
+    return {
+        "layout": {
+            "type": "Page",
+            "title": title,
+            "children": [
+                {
+                    "type": "Chart",
+                    "chartType": chart_type,
+                    "metric": metric,
+                    "source": source,
+                }
+            ],
+        }
+    }
+
+
+def describe_sources() -> dict:
+    """Return available data sources and fields."""
+
+    summary = {}
+    for key, rows in db.items():
+        fields = set()
+        if isinstance(rows, list):
+            for row in rows[:3]:
+                if isinstance(row, dict):
+                    fields.update(row.keys())
+        summary[key] = {
+            "rows": len(rows) if isinstance(rows, list) else 0,
+            "fields": sorted(fields),
+        }
+    return {"datasets": {}, "meta": {"sources": summary}}
+
+
+tools = [fetch_dataset, build_table_layout, build_chart_layout, describe_sources]
 
 ### -------- Request Model -------- ###
 
