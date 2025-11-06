@@ -1,7 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function ChatSidebar({ messages = [], loading = false }) {
   const scrollRef = useRef(null);
+  const [openThreads, setOpenThreads] = useState(() =>
+    messages.map(() => false)
+  );
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -9,6 +12,29 @@ export default function ChatSidebar({ messages = [], loading = false }) {
     // Always stick to bottom as content streams in
     el.scrollTop = el.scrollHeight;
   }, [messages, loading]);
+
+  useEffect(() => {
+    setOpenThreads((prev) => {
+      if (prev.length === messages.length) return prev;
+      return messages.map((m, idx) => prev[idx] ?? false);
+    });
+  }, [messages]);
+
+  const toggleThread = useCallback((index) => {
+    setOpenThreads((prev) => {
+      const next = prev.map((isOpen, idx) =>
+        idx === index ? !isOpen : isOpen
+      );
+      if (!prev[index] && next[index]) {
+        requestAnimationFrame(() => {
+          const el = scrollRef.current;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      }
+      return next;
+    });
+  }, []);
+
   return (
     <aside className="w-full">
       <div className="rounded-2xl border border-slate-200 bg-white shadow-md">
@@ -35,9 +61,21 @@ export default function ChatSidebar({ messages = [], loading = false }) {
               <div className="whitespace-pre-wrap break-words">{m.content}</div>
               {(Array.isArray(m.logs) && m.logs.length > 0) ||
               (Array.isArray(m.thinking) && m.thinking.length > 0) ? (
-                <div className="mt-2 text-[11px] text-slate-700">
-                  <div className="font-semibold mb-1">Process</div>
-                  <ul className="space-y-1">
+                <details
+                  className="mt-2 text-[11px] text-slate-700"
+                  open={openThreads[i]}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    toggleThread(i);
+                  }}
+                >
+                  <summary className="flex cursor-pointer list-none items-center justify-between rounded bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-800">
+                    <span>Process</span>
+                    <span className="text-[10px] uppercase">
+                      {openThreads[i] ? "Collapse" : "Expand"}
+                    </span>
+                  </summary>
+                  <ul className="mt-2 space-y-1">
                     {(Array.isArray(m.logs) && m.logs.length > 0
                       ? m.logs
                       : (m.thinking || []).map((t) => ({ type: "thinking", text: t }))
@@ -53,14 +91,14 @@ export default function ChatSidebar({ messages = [], loading = false }) {
                           ? "Data"
                           : "Thinking";
                       return (
-                        <li key={j} className="break-words">
-                          <span className="font-semibold mr-1">{label}:</span>
-                          <span>{entry.text}</span>
+                        <li key={j} className="rounded bg-slate-100 p-2">
+                          <div className="font-semibold mb-0.5">{label}</div>
+                          <div className="break-words">{entry.text}</div>
                         </li>
                       );
                     })}
                   </ul>
-                </div>
+                </details>
               ) : null}
             </div>
           ))}
